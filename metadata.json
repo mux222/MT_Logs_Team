@@ -1,0 +1,8 @@
+{
+  "name": "MT | LOGS TEAM OFFICIAL PORTAL",
+  "description": "نظام متابعة السجلات والتذاكر ومعلومات الباند لسيرفر Mystery Town. يدعم رفع الأدلة والبحث المتقدم.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

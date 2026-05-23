@@ -1,0 +1,143 @@
+@import "tailwindcss";
+
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Noto+Sans+Arabic:wght@300;600;800&display=swap');
+
+@theme {
+  --color-bg: #020202;
+  --color-card: #0a0a0a;
+  --color-aside: #080808;
+  --color-orange: #ff6a00;
+  --color-gold: #ff6a00;
+  --color-gold-glow: rgba(255, 106, 0, 0.3);
+  --color-orange-glow: rgba(255, 106, 0, 0.4);
+  --drop-shadow-gold: 0 0 30px rgba(255, 106, 0, 0.6);
+  --color-red: #ff4d4d;
+  --color-text-dim: #888;
+  
+  --font-orbitron: "Orbitron", sans-serif;
+  --font-arabic: "Noto Sans Arabic", sans-serif;
+  
+  --shadow-glow: 0 0 40px rgba(255, 106, 0, 0.4);
+  --shadow-orange-btn: 0 10px 30px rgba(255, 106, 0, 0.3);
+  --bg-orange-beam: radial-gradient(circle at center, rgba(255, 106, 0, 0.1) 0%, transparent 70%);
+}
+
+@layer base {
+  body {
+    @apply bg-bg text-white overflow-x-hidden font-arabic transition-colors duration-500;
+    background: radial-gradient(circle, #000000 0%, #050505 100%) fixed;
+  }
+}
+
+@layer components {
+  /* Elegant Dark UI Components */
+  .glow-hover {
+    @apply transition-all duration-300 border border-white/5;
+  }
+  .glow-hover:hover {
+    @apply border-orange/40 translate-y-[-4px];
+    box-shadow: 0 8px 30px rgba(255, 106, 0, 0.1);
+    background-image: var(--bg-orange-beam);
+  }
+
+  .nav-link {
+    @apply text-text-dim px-4 py-2 cursor-pointer text-sm transition-all hover:text-white;
+  }
+  .nav-link.active {
+    @apply text-white font-bold border-b-2 border-orange;
+  }
+
+  .card {
+    @apply bg-card border border-white/5 rounded-[24px] p-6 transition-all;
+  }
+
+  .btn-orange {
+    @apply bg-orange text-black px-6 py-3 rounded-xl font-extrabold cursor-pointer transition-all hover:brightness-110 active:scale-95 text-center disabled:opacity-50;
+    box-shadow: var(--shadow-orange-btn);
+  }
+
+  .btn-gold {
+    @apply relative overflow-hidden bg-orange text-black px-10 py-4 rounded-2xl font-black tracking-widest uppercase transition-all duration-500 hover:scale-105 active:scale-95 shadow-[0_10px_40px_rgba(255,106,0,0.4)];
+  }
+  .btn-gold::after {
+    content: '';
+    @apply absolute inset-0 bg-white/30 translate-x-[-100%] transition-transform duration-700 skew-x-12;
+  }
+  .btn-gold:hover::after {
+    @apply translate-x-[100%];
+  }
+
+  .btn-luxury-outline {
+    @apply border border-orange/40 bg-transparent text-orange px-10 py-4 rounded-2xl font-bold tracking-widest uppercase transition-all hover:bg-orange/10 hover:border-orange;
+  }
+
+  .cyber-grid {
+    background-image: linear-gradient(to right, rgba(255, 106, 0, 0.08) 1.5px, transparent 1.5px),
+                      linear-gradient(to bottom, rgba(255, 106, 0, 0.08) 1.5px, transparent 1.5px);
+    background-size: 80px 80px;
+  }
+
+  .drop-shadow-gold {
+    filter: drop-shadow(var(--drop-shadow-gold));
+  }
+
+  .scanning-line {
+    @apply absolute left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-orange/40 to-transparent;
+    animation: scan 6s linear infinite;
+  }
+
+  @keyframes scan {
+    0% { top: 0%; opacity: 0; }
+    10% { opacity: 1; }
+    90% { opacity: 1; }
+    100% { top: 100%; opacity: 0; }
+  }
+
+  .input-field {
+    @apply w-full bg-[#111] border border-white/10 text-white p-4 rounded-xl outline-none focus:border-orange focus:ring-0 transition-all placeholder:text-gray-600;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 5px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(255, 106, 0, 0.2);
+    border-radius: 10px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-orange;
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
+
+/* RTL Layout Fixes */
+[dir="rtl"] .section-title {
+  border-right: 4px solid var(--color-orange);
+  padding-right: 1rem;
+}
+
+[dir="rtl"] .Achievement-title {
+  border-right: 4px solid var(--color-orange);
+  padding-right: 1rem;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-in {
+  animation: fadeIn 0.4s ease forwards;
+}
+
