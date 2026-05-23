@@ -3,23 +3,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-
 const WORKER_URL = "https://r2-uploader.abotete1.workers.dev";
 
 // ═══════════════════════════════════════════════════════
-//  SECURE WEBHOOK PROXY — Webhooks hidden server-side
-//  أرسل الإشعارات عبر Supabase Edge Function فقط
-//  لا يوجد أي رابط webhook في هذا الكود
-// ═══════════════════════════════════════════════════════
-
-// ═══════════════════════════════════════════════════════
-//  DISCORD WEBHOOKS — URLs loaded from db.ts env vars
+//  DISCORD NOTIFICATIONS — via Supabase Edge Function
+//  الـ webhook URL لا يظهر في bundle أبداً
 // ═══════════════════════════════════════════════════════
 
 const sendDiscordTicketNotification = async (subject: string, creator: string, ticketId: number | string) => {
   try {
-    const webhookUrl = getDiscordWebhook('ticket');
-    if (!webhookUrl) { console.warn('Ticket webhook not configured'); return; }
     const payload = {
       content: '@everyone',
       embeds: [{
@@ -36,22 +28,14 @@ const sendDiscordTicketNotification = async (subject: string, creator: string, t
         timestamp: new Date().toISOString()
       }]
     };
-    const res = await fetch(webhookUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (res.ok) console.log('Discord ticket notify sent ✅');
-    else console.error('Discord ticket error:', await res.text());
+    await sendDiscordViaEdge('ticket', payload);
   } catch (e) {
-    console.error('Discord ticket webhook error:', e);
+    console.error('Discord ticket notification error:', e);
   }
 };
 
 const sendDiscordBanNotification = async (discordId: string, banType: string, reason: string, bannedBy: string) => {
   try {
-    const webhookUrl = getDiscordWebhook('ban');
-    if (!webhookUrl) { console.warn('Ban webhook not configured'); return; }
     const payload = {
       content: '@everyone',
       embeds: [{
@@ -68,194 +52,167 @@ const sendDiscordBanNotification = async (discordId: string, banType: string, re
         timestamp: new Date().toISOString()
       }]
     };
-    const res = await fetch(webhookUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (res.ok) console.log('Discord ban notify sent ✅');
-    else console.error('Discord ban error:', await res.text());
+    await sendDiscordViaEdge('ban', payload);
   } catch (e) {
-    console.error('Discord ban webhook error:', e);
+    console.error('Discord ban notification error:', e);
   }
 };
 
 // ═══════════════════════════════════════════════════════
-//  PASSWORD HASHING — SHA-256 via Web Crypto API
-// ═══════════════════════════════════════════════════════
-
-const hashPassword = async (password: string): Promise<string> => {
-  // نحاول crypto.subtle أولاً (HTTPS) — نرجع لـ fallback لو ما توفر (HTTP)
-  const salted = `MT_LOGS_2026:${password}:SEC_SALT_X9K`;
-  try {
-    if (typeof crypto !== 'undefined' && crypto.subtle && crypto.subtle.digest) {
-      const encoder = new TextEncoder();
-      const data = encoder.encode(salted);
-      const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-      const hashArray = Array.from(new Uint8Array(hashBuffer));
-      return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-    }
-  } catch {}
-  // Fallback: خوارزمية hash بسيطة لا تحتاج Web Crypto API
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < salted.length; i++) {
-    hash ^= salted.charCodeAt(i);
-    hash = (hash * 0x01000193) >>> 0;
-  }
-  // نطوّل الناتج لـ 64 حرف عشان يبقى متوافق مع تحقق الـ hash
-  let result = hash.toString(16).padStart(8, '0');
-  // نكرر ونخلط عشان نوصل 64 حرف
-  let seed = hash;
-  for (let r = 0; r < 7; r++) {
-    seed = (seed * 0x5851f42d + 0xc4ceb9fe) >>> 0;
-    result += seed.toString(16).padStart(8, '0');
-  }
-  return result.slice(0, 64);
-};
-
-const verifyPassword = async (password: string, hash: string): Promise<boolean> => {
-  const computed = await hashPassword(password);
-  return computed === hash;
-};
-
+//  PASSWORD HASHING — PBKDF2 (200k iterations, per-user salt)
+//  كل المنطق الآن في db.ts لاستخدام الدوال المُصدَّرة
 // ═══════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════
-//  SECURITY SYSTEM — Multi-Layer Protection
+//  SESSION MANAGEMENT — sessionStorage only (no localStorage for session)
+//  - الجلسة لا تُخزَّن في localStorage إلا عند "تذكرني"
+//  - البيانات مشفرة بـ AES-GCM (Web Crypto) وليس XOR
 // ═══════════════════════════════════════════════════════
 
 const SEC = {
-  SESSION_KEY: '__mt_sess__',
+  SESSION_KEY:  '__mt_sess__',
   REMEMBER_KEY: '__mt_rmb__',
-  FINGERPRINT_KEY: '__mt_fp__',
-  CSRF_KEY: '__mt_csrf__',
+  CSRF_KEY:     '__mt_csrf__',
   ATTEMPTS_KEY: '__mt_atm__',
-  LOCKOUT_KEY: '__mt_lck__',
-  MAX_ATTEMPTS: 5,
+  LOCKOUT_KEY:  '__mt_lck__',
+  MAX_ATTEMPTS:     5,
   LOCKOUT_DURATION: 15 * 60 * 1000,
   SESSION_DURATION: 2 * 60 * 60 * 1000,
   REMEMBER_DURATION: 30 * 24 * 60 * 60 * 1000,
+  // مفتاح ثابت للتشفير — يكفي لبيئة client-side إذا استخدمنا IV عشوائي
+  ENC_KEY_RAW: 'MT_LOGS_AES_KEY_2026_v2_32BytesX!',
 };
 
-const obfuscate = (str: string): string => {
-  const key = 'MT_LOGS_SECURE_2026';
-  return btoa(str.split('').map((c, i) =>
-    String.fromCharCode(c.charCodeAt(0) ^ key.charCodeAt(i % key.length))
-  ).join(''));
+// AES-GCM encryption key — تُشتق من ثابت النص مرة واحدة
+let _aesKey: CryptoKey | null = null;
+const getAesKey = async (): Promise<CryptoKey> => {
+  if (_aesKey) return _aesKey;
+  const enc = new TextEncoder();
+  const raw = enc.encode(SEC.ENC_KEY_RAW).slice(0, 32);
+  _aesKey = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
+  return _aesKey;
 };
 
-const deobfuscate = (str: string): string => {
-  try {
-    const key = 'MT_LOGS_SECURE_2026';
-    return atob(str).split('').map((c, i) =>
-      String.fromCharCode(c.charCodeAt(0) ^ key.charCodeAt(i % key.length))
-    ).join('');
-  } catch { return ''; }
+const encryptData = async (plaintext: string): Promise<string> => {
+  const key = await getAesKey();
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const enc = new TextEncoder();
+  const cipherBuf = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(plaintext));
+  // نجمع IV + ciphertext في base64 واحد
+  const combined = new Uint8Array(iv.byteLength + cipherBuf.byteLength);
+  combined.set(iv, 0);
+  combined.set(new Uint8Array(cipherBuf), iv.byteLength);
+  return btoa(String.fromCharCode(...combined));
 };
 
-const getBrowserFingerprint = (): string => {
-  const components = [
-    navigator.userAgent,
-    navigator.language,
-    screen.width + 'x' + screen.height,
-    screen.colorDepth,
-    new Date().getTimezoneOffset(),
-    navigator.hardwareConcurrency || 0,
-    navigator.platform || '',
-  ].join('|');
-  let hash = 0;
-  for (let i = 0; i < components.length; i++) {
-    const char = components.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash = hash & hash;
-  }
-  return Math.abs(hash).toString(36);
+const decryptData = async (b64: string): Promise<string> => {
+  const key = await getAesKey();
+  const combined = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  const iv = combined.slice(0, 12);
+  const cipherBuf = combined.slice(12);
+  const decBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, cipherBuf);
+  return new TextDecoder().decode(decBuf);
 };
 
 const generateCSRFToken = (): string => {
-  const arr = new Uint8Array(16);
+  const arr = new Uint8Array(32);
   crypto.getRandomValues(arr);
   return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
 };
 
+// ── Rate Limiting ──
+// ملاحظة: هذا الـ rate limit هو client-side كطبقة أولى فقط.
+// الحماية الحقيقية يجب أن تكون في Supabase Edge Function أو Cloudflare Worker.
 const checkRateLimit = (): { blocked: boolean; remaining: number; lockoutLeft: number } => {
-  const lockoutStr = localStorage.getItem(SEC.LOCKOUT_KEY);
+  const lockoutStr = sessionStorage.getItem(SEC.LOCKOUT_KEY) || localStorage.getItem(SEC.LOCKOUT_KEY);
   if (lockoutStr) {
     const lockoutUntil = parseInt(lockoutStr);
     const now = Date.now();
     if (now < lockoutUntil) {
       return { blocked: true, remaining: 0, lockoutLeft: Math.ceil((lockoutUntil - now) / 1000) };
-    } else {
-      localStorage.removeItem(SEC.LOCKOUT_KEY);
-      localStorage.removeItem(SEC.ATTEMPTS_KEY);
     }
+    sessionStorage.removeItem(SEC.LOCKOUT_KEY);
+    localStorage.removeItem(SEC.LOCKOUT_KEY);
+    sessionStorage.removeItem(SEC.ATTEMPTS_KEY);
+    localStorage.removeItem(SEC.ATTEMPTS_KEY);
   }
-  const attemptsStr = localStorage.getItem(SEC.ATTEMPTS_KEY);
+  const attemptsStr = sessionStorage.getItem(SEC.ATTEMPTS_KEY);
   const attempts = attemptsStr ? JSON.parse(attemptsStr) : [];
   const recent = attempts.filter((t: number) => Date.now() - t < 10 * 60 * 1000);
   return { blocked: false, remaining: SEC.MAX_ATTEMPTS - recent.length, lockoutLeft: 0 };
 };
 
 const recordFailedAttempt = () => {
-  const attemptsStr = localStorage.getItem(SEC.ATTEMPTS_KEY);
+  const attemptsStr = sessionStorage.getItem(SEC.ATTEMPTS_KEY);
   const attempts = attemptsStr ? JSON.parse(attemptsStr) : [];
   attempts.push(Date.now());
   const recent = attempts.filter((t: number) => Date.now() - t < 10 * 60 * 1000);
-  localStorage.setItem(SEC.ATTEMPTS_KEY, JSON.stringify(recent));
+  sessionStorage.setItem(SEC.ATTEMPTS_KEY, JSON.stringify(recent));
   if (recent.length >= SEC.MAX_ATTEMPTS) {
-    localStorage.setItem(SEC.LOCKOUT_KEY, String(Date.now() + SEC.LOCKOUT_DURATION));
+    const lockUntil = String(Date.now() + SEC.LOCKOUT_DURATION);
+    sessionStorage.setItem(SEC.LOCKOUT_KEY, lockUntil);
+    // نحفظ في localStorage أيضاً عشان Incognito لا يساعد
+    localStorage.setItem(SEC.LOCKOUT_KEY, lockUntil);
+    localStorage.setItem(SEC.ATTEMPTS_KEY, JSON.stringify(recent));
   }
 };
 
 const clearAttempts = () => {
+  sessionStorage.removeItem(SEC.ATTEMPTS_KEY);
+  sessionStorage.removeItem(SEC.LOCKOUT_KEY);
   localStorage.removeItem(SEC.ATTEMPTS_KEY);
   localStorage.removeItem(SEC.LOCKOUT_KEY);
 };
 
-const saveSession = (user: string, remember: boolean) => {
-  const fingerprint = getBrowserFingerprint();
+// ── Session Storage ──
+const saveSession = async (user: string, role: string, remember: boolean) => {
   const csrf = generateCSRFToken();
   const expiry = Date.now() + (remember ? SEC.REMEMBER_DURATION : SEC.SESSION_DURATION);
-  const sessionData = obfuscate(JSON.stringify({ user, fingerprint, csrf, expiry, remember }));
+  const sessionObj = JSON.stringify({ user, role, csrf, expiry, remember });
+  const encrypted = await encryptData(sessionObj);
+  const storage = remember ? localStorage : sessionStorage;
+  storage.setItem(SEC.SESSION_KEY, encrypted);
+  // CSRF يبقى في sessionStorage دائماً — لا يُرسَل تلقائياً مع الطلبات
+  sessionStorage.setItem(SEC.CSRF_KEY, csrf);
   if (remember) {
-    localStorage.setItem(SEC.SESSION_KEY, sessionData);
-    localStorage.setItem(SEC.REMEMBER_KEY, obfuscate(user));
-  } else {
-    sessionStorage.setItem(SEC.SESSION_KEY, sessionData);
+    const encUser = await encryptData(user);
+    localStorage.setItem(SEC.REMEMBER_KEY, encUser);
   }
-  localStorage.setItem(SEC.FINGERPRINT_KEY, fingerprint);
-  localStorage.setItem(SEC.CSRF_KEY, csrf);
 };
 
-const loadSession = (): { user: string; valid: boolean } | null => {
+const loadSession = async (): Promise<{ user: string; role: string; valid: boolean } | null> => {
   const raw = sessionStorage.getItem(SEC.SESSION_KEY) || localStorage.getItem(SEC.SESSION_KEY);
   if (!raw) return null;
   try {
-    const data = JSON.parse(deobfuscate(raw));
-    if (!data || !data.user || !data.expiry) return null;
+    const decrypted = await decryptData(raw);
+    const data = JSON.parse(decrypted);
+    if (!data?.user || !data?.expiry || !data?.role) return null;
     if (Date.now() > data.expiry) { clearSession(); return null; }
-    // fingerprint check removed — caused false logouts on browser/device changes
-    return { user: data.user, valid: true };
-  } catch { return null; }
+    return { user: data.user, role: data.role, valid: true };
+  } catch {
+    clearSession();
+    return null;
+  }
 };
 
 const clearSession = () => {
   sessionStorage.removeItem(SEC.SESSION_KEY);
+  sessionStorage.removeItem(SEC.CSRF_KEY);
   localStorage.removeItem(SEC.SESSION_KEY);
   localStorage.removeItem(SEC.REMEMBER_KEY);
-  localStorage.removeItem(SEC.FINGERPRINT_KEY);
-  localStorage.removeItem(SEC.CSRF_KEY);
 };
 
-const getSavedUsername = (): string => {
+const getSavedUsername = async (): Promise<string> => {
   const raw = localStorage.getItem(SEC.REMEMBER_KEY);
   if (!raw) return '';
-  return deobfuscate(raw);
+  try { return await decryptData(raw); } catch { return ''; }
 };
 
-// ═══════════════════════════════════════════════════════
-
+// ── File Upload (with validation) ──
 const uploadVideoToR2 = async (file: File, fileName: string): Promise<string> => {
+  const validation = validateFile(file);
+  if (!validation.ok) throw new Error(validation.error);
+
   const response = await fetch(`${WORKER_URL}/${fileName}`, {
     method: 'PUT',
     body: file,
@@ -265,7 +222,6 @@ const uploadVideoToR2 = async (file: File, fileName: string): Promise<string> =>
   const data = await response.json();
   return data.url;
 };
-  
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -308,7 +264,11 @@ import {
   ClipboardList
 } from 'lucide-react';
 import { User, UserRole, Ticket, Ban, Message, BanEvidence, AuditLog, PersonalNote } from './types';
-import { getAll, putItem, deleteItem, supabase, dbDiagnostics, getDiscordWebhook } from './db';
+import {
+  getAll, putItem, deleteItem, supabase, dbDiagnostics,
+  hashPasswordWithSalt, verifyPasswordWithSalt, legacyVerify,
+  generateSalt, verifyUserRoleFromDB, validateFile, sendDiscordViaEdge
+} from './db';
 
 export default function App() {
   const [activeSec, setActiveSec] = useState<'home' | 'team' | 'goals' | 'tickets' | 'bans' | 'manage' | 'profile' | 'audit_logs' | 'closed_tickets' | 'my_dashboard' | 'notepad' | 'manager_notes' | 'leaderboard'>('home');
@@ -389,26 +349,30 @@ export default function App() {
       try {
         const u = await getAll<User>('users');
         if (u.length === 0) {
-          const defaultHashedPass = await hashPassword('098');
+          const salt = generateSalt();
+          const defaultHashedPass = await hashPasswordWithSalt('098', salt);
           const defaultAdmin: User = { user: 'admin', pass: defaultHashedPass, role: UserRole.MANAGER, status: 'active' };
           await putItem('users', defaultAdmin);
           setUsers([defaultAdmin]);
         } else {
           setUsers(u);
-          // Auto-login from saved session
-          const session = loadSession();
+          // Auto-login from saved session (async AES-GCM decryption)
+          const session = await loadSession();
           if (session?.valid) {
+            // تحقق من الـ role من DB مباشرة — يمنع تزوير الـ role عبر DevTools
+            const confirmedRole = await verifyUserRoleFromDB(session.user);
             const savedUser = u.find(usr => usr.user === session.user);
-            if (savedUser && savedUser.status === 'active') {
-              setCurrentUser(savedUser);
+            if (savedUser && savedUser.status === 'active' && confirmedRole) {
+              const verifiedUser = { ...savedUser, role: confirmedRole as any };
+              setCurrentUser(verifiedUser);
               setActiveSec('home');
-              if (savedUser.role !== UserRole.ADMIN) setTicketViewMode('all');
+              if (verifiedUser.role !== UserRole.ADMIN) setTicketViewMode('all');
             } else {
               clearSession();
             }
           }
           // Pre-fill remembered username
-          const saved = getSavedUsername();
+          const saved = await getSavedUsername();
           if (saved) {
             setAuthInputs(prev => ({ ...prev, user: saved }));
             setRememberMe(true);
@@ -598,18 +562,18 @@ export default function App() {
 
       if (candidate) {
         const storedPass = candidate.pass;
-        const isHashed = storedPass.length === 64 && /^[0-9a-f]+$/.test(storedPass);
+        const isPbkdf2 = storedPass.startsWith('pbkdf2$');
 
-        if (isHashed) {
-          // باسورد مشفر — نتحقق بالـ hash
-          authenticated = await verifyPassword(authInputs.pass, storedPass);
+        if (isPbkdf2) {
+          // كلمة مرور PBKDF2 حديثة — التحقق الصحيح
+          authenticated = await verifyPasswordWithSalt(authInputs.pass, storedPass);
         } else {
-          // باسورد نصي قديم — نقارن مباشرة
-          if (storedPass === authInputs.pass) {
-            authenticated = true;
-            // نرقّيه لـ hash في الخلفية بدون توقف
+          // legacy (SHA-256 قديم أو plain-text) — نتحقق ثم نرقّي فوراً
+          authenticated = await legacyVerify(authInputs.pass, storedPass);
+          if (authenticated) {
             try {
-              const newHash = await hashPassword(authInputs.pass);
+              const newSalt = generateSalt();
+              const newHash = await hashPasswordWithSalt(authInputs.pass, newSalt);
               const upgraded = { ...candidate, pass: newHash };
               await putItem('users', upgraded);
               finalUser = upgraded;
@@ -643,10 +607,16 @@ export default function App() {
         return;
       }
 
-      // ✅ دخول ناجح
+      // ✅ دخول ناجح — نتحقق من الـ role من DB قبل حفظ الجلسة
+      const confirmedRole = await verifyUserRoleFromDB(finalUser.user);
+      if (!confirmedRole) {
+        setAuthFeedback({ type: 'error', msg: '🚫 لم يتمكن النظام من التحقق من صلاحياتك، تواصل مع المسؤولين' });
+        return;
+      }
+      const verifiedFinalUser = { ...finalUser, role: confirmedRole as any };
       clearAttempts();
-      saveSession(finalUser.user, rememberMe);
-      setCurrentUser(finalUser);
+      await saveSession(verifiedFinalUser.user, verifiedFinalUser.role, rememberMe);
+      setCurrentUser(verifiedFinalUser);
       setAuthInputs({ user: '', pass: '', role: UserRole.LOGS });
       setAuthFeedback(null);
       setActiveSec('home');
@@ -692,7 +662,8 @@ export default function App() {
     setAuthFeedback(null);
 
     try {
-      const hashedPass = await hashPassword(authInputs.pass.trim());
+      const newSalt = generateSalt();
+      const hashedPass = await hashPasswordWithSalt(authInputs.pass.trim(), newSalt);
       const newUser: User = {
         user: authInputs.user.trim(),
         pass: hashedPass,
@@ -723,7 +694,11 @@ export default function App() {
     const { user: newUser, pass: newPass } = authInputs;
     const updatedUsers = await Promise.all(users.map(async u => {
       if (u.user === currentUser.user) {
-        const updatedPass = newPass ? await hashPassword(newPass) : u.pass;
+        let updatedPass = u.pass;
+        if (newPass) {
+          const salt = generateSalt();
+          updatedPass = await hashPasswordWithSalt(newPass, salt);
+        }
         return { ...u, user: newUser || u.user, pass: updatedPass };
       }
       return u;
@@ -737,6 +712,12 @@ export default function App() {
 
   // User Management
   const approveUser = async (name: string) => {
+    // تحقق من الصلاحية من DB مباشرة — ليس من الـ state فقط
+    const actorRole = await verifyUserRoleFromDB(currentUser?.user || '');
+    if (actorRole !== UserRole.MANAGER && actorRole !== UserRole.ADMIN) {
+      setToast({ show: true, msg: '🚫 ليس لديك صلاحية لتنفيذ هذا الإجراء' });
+      return;
+    }
     const updated = users.map(u => u.user === name ? { ...u, status: 'active' as const } : u);
     setUsers(updated);
     await putItem('users', updated.find(u => u.user === name)!);
@@ -748,6 +729,12 @@ export default function App() {
       "حذف مستخدم",
       `هل أنت متأكد من حذف المستخدم ${name}؟ لا يمكن التراجع عن هذا الإجراء.`,
       async () => {
+        // تحقق من الصلاحية من DB قبل الحذف
+        const actorRole = await verifyUserRoleFromDB(currentUser?.user || '');
+        if (actorRole !== UserRole.MANAGER && actorRole !== UserRole.ADMIN) {
+          setToast({ show: true, msg: '🚫 ليس لديك صلاحية لحذف المستخدمين' });
+          return;
+        }
         const updated = users.filter(u => u.user !== name);
         setUsers(updated);
         await deleteItem('users', name);
@@ -1120,6 +1107,12 @@ const addBan = async () => {
       "حذف سجل",
       "هل أنت متأكد من حذف هذه الحالة نهائياً من النظام؟",
       async () => {
+        // تحقق من الصلاحية من DB قبل الحذف
+        const actorRole = await verifyUserRoleFromDB(currentUser?.user || '');
+        if (actorRole !== UserRole.MANAGER && actorRole !== UserRole.ADMIN) {
+          setToast({ show: true, msg: '🚫 ليس لديك صلاحية لحذف سجلات الباند' });
+          return;
+        }
         await deleteItem('bans', id);
         setBans(bans.filter(b => b.id !== id));
         await addAuditLog('Delete Ban', `Deleted ban record ID: ${id}`);
