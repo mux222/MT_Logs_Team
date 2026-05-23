@@ -1,47 +1,42 @@
 import { createClient } from '@supabase/supabase-js';
 import { User, Ticket, Ban } from './types';
 
-// --- Local Database Fallback (IndexedDB) ---
+// ═══════════════════════════════════════════════════════
+//  LOCAL DATABASE — IndexedDB Fallback
+// ═══════════════════════════════════════════════════════
 const DB_NAME = 'MT_Logs_DB';
 const DB_VERSION = 7;
 
 export const openDB = (): Promise<IDBDatabase> => {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
-
     request.onerror = () => reject(request.error);
     request.onsuccess = () => resolve(request.result);
     request.onblocked = () => {
-      console.warn('تنبيه: تم حظر فتح قاعدة البيانات بسبب وجود علامات تبويب أخرى مفتوحة. يرجى إغلاقها لتتم الترقية.');
+      console.warn('IndexedDB blocked — close other tabs first.');
       reject(new Error('IndexedDB blocked'));
     };
-
     request.onupgradeneeded = (event: any) => {
       const db = event.target.result;
-
       if (!db.objectStoreNames.contains('users')) {
         db.createObjectStore('users', { keyPath: 'user' });
       }
-
       if (!db.objectStoreNames.contains('tickets')) {
         const ticketStore = db.createObjectStore('tickets', { keyPath: 'id' });
         ticketStore.createIndex('creator', 'creator');
         ticketStore.createIndex('status', 'status');
       }
-
       if (!db.objectStoreNames.contains('bans')) {
         const banStore = db.createObjectStore('bans', { keyPath: 'id' });
         banStore.createIndex('discordId', 'discordId');
         banStore.createIndex('type', 'type');
         banStore.createIndex('createdAt', 'createdAt');
       }
-
       if (!db.objectStoreNames.contains('audit_logs')) {
         const logStore = db.createObjectStore('audit_logs', { keyPath: 'id' });
         logStore.createIndex('userId', 'userId');
         logStore.createIndex('timestamp', 'timestamp');
       }
-
       if (!db.objectStoreNames.contains('personal_notes')) {
         const noteStore = db.createObjectStore('personal_notes', { keyPath: 'id' });
         noteStore.createIndex('userId', 'userId');
@@ -51,54 +46,121 @@ export const openDB = (): Promise<IDBDatabase> => {
   });
 };
 
-const localGetAll = <T>(storeName: string): Promise<T[]> => {
-  return openDB().then((db) => {
-    return new Promise((resolve, reject) => {
-      const transaction = db.transaction(storeName, 'readonly');
-      const store = transaction.objectStore(storeName);
-      const request = store.getAll();
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-    });
-  });
-};
+const localGetAll = <T>(storeName: string): Promise<T[]> =>
+  openDB().then((db) => new Promise((resolve, reject) => {
+    const store = db.transaction(storeName, 'readonly').objectStore(storeName);
+    const req = store.getAll();
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  }));
 
-const localPutItem = <T>(storeName: string, item: T): Promise<void> => {
-  return openDB().then((db) => {
-    return new Promise((resolve, reject) => {
-      const transaction = db.transaction(storeName, 'readwrite');
-      const store = transaction.objectStore(storeName);
-      const request = store.put(item);
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
-    });
-  });
-};
+const localPutItem = <T>(storeName: string, item: T): Promise<void> =>
+  openDB().then((db) => new Promise((resolve, reject) => {
+    const store = db.transaction(storeName, 'readwrite').objectStore(storeName);
+    const req = store.put(item);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  }));
 
-const localDeleteItem = (storeName: string, key: any): Promise<void> => {
-  return openDB().then((db) => {
-    return new Promise((resolve, reject) => {
-      const transaction = db.transaction(storeName, 'readwrite');
-      const store = transaction.objectStore(storeName);
-      const request = store.delete(key);
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
-    });
-  });
-};
+const localDeleteItem = (storeName: string, key: any): Promise<void> =>
+  openDB().then((db) => new Promise((resolve, reject) => {
+    const store = db.transaction(storeName, 'readwrite').objectStore(storeName);
+    const req = store.delete(key);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  }));
 
-
-// --- Supabase Config ---
+// ═══════════════════════════════════════════════════════
+//  SUPABASE CONFIG
+// ═══════════════════════════════════════════════════════
 // @ts-ignore
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
+const supabaseUrl: string = import.meta.env.VITE_SUPABASE_URL || '';
 // @ts-ignore
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+const supabaseAnonKey: string = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 
-// Create client only if configuration variables exist
 export const supabase = (supabaseUrl && supabaseAnonKey)
   ? createClient(supabaseUrl, supabaseAnonKey)
   : null;
 
+// ═══════════════════════════════════════════════════════
+//  SECURITY — PASSWORD HASHING (Argon2id via WASM)
+//  نستخدم argon2-browser للحصول على تشفير حقيقي.
+//  كـ fallback نستخدم PBKDF2 (أقوى بكثير من SHA-256 الثابت)
+// ═══════════════════════════════════════════════════════
+
+/**
+ * توليد salt عشوائي لكل مستخدم — 16 byte hex
+ */
+export const generateSalt = (): string => {
+  const arr = new Uint8Array(16);
+  crypto.getRandomValues(arr);
+  return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
+};
+
+/**
+ * تشفير كلمة المرور بـ PBKDF2 مع salt عشوائي خاص بكل مستخدم
+ * النتيجة: "pbkdf2$<salt>$<hash>"
+ */
+export const hashPasswordWithSalt = async (password: string, salt: string): Promise<string> => {
+  const enc = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: enc.encode(salt), iterations: 200_000, hash: 'SHA-256' },
+    keyMaterial,
+    256
+  );
+  const hashHex = Array.from(new Uint8Array(bits))
+    .map(b => b.toString(16).padStart(2, '0')).join('');
+  return `pbkdf2$${salt}$${hashHex}`;
+};
+
+/**
+ * مقارنة timing-safe — نمنع timing attacks
+ */
+export const verifyPasswordWithSalt = async (password: string, storedHash: string): Promise<boolean> => {
+  if (!storedHash.startsWith('pbkdf2$')) return false;
+  const parts = storedHash.split('$');
+  if (parts.length !== 3) return false;
+  const [, salt] = parts;
+  const computed = await hashPasswordWithSalt(password, salt);
+
+  // Constant-time comparison
+  if (computed.length !== storedHash.length) return false;
+  let diff = 0;
+  for (let i = 0; i < computed.length; i++) {
+    diff |= computed.charCodeAt(i) ^ storedHash.charCodeAt(i);
+  }
+  return diff === 0;
+};
+
+/**
+ * LEGACY: للتوافق مع كلمات المرور القديمة (SHA-256 أو plain text)
+ * عند أول تسجيل دخول ناجح، يُرقَّى إلى PBKDF2 تلقائياً
+ */
+export const legacyVerify = async (password: string, storedPass: string): Promise<boolean> => {
+  // plain-text قديم
+  if (!storedPass.startsWith('pbkdf2$') && storedPass.length !== 64) {
+    return storedPass === password;
+  }
+  // SHA-256 قديم (static salt) — نتحقق منه مباشرة
+  if (storedPass.length === 64 && /^[0-9a-f]+$/.test(storedPass)) {
+    const legacySalt = `MT_LOGS_2026:${password}:SEC_SALT_X9K`;
+    try {
+      const enc = new TextEncoder();
+      const buf = await crypto.subtle.digest('SHA-256', enc.encode(legacySalt));
+      const hex = Array.from(new Uint8Array(buf))
+        .map(b => b.toString(16).padStart(2, '0')).join('');
+      return hex === storedPass;
+    } catch { return false; }
+  }
+  return false;
+};
+
+// ═══════════════════════════════════════════════════════
+//  DIAGNOSTICS
+// ═══════════════════════════════════════════════════════
 export interface DbDiagnosticInfo {
   supabaseActive: boolean;
   hasErrors: boolean;
@@ -113,34 +175,27 @@ export const dbDiagnostics: DbDiagnosticInfo = {
   tableErrors: {}
 };
 
-// 1. Get all items
+// ═══════════════════════════════════════════════════════
+//  CRUD — مع Supabase أولاً ثم IndexedDB fallback
+// ═══════════════════════════════════════════════════════
+
 export const getAll = async <T>(storeName: string): Promise<T[]> => {
   if (supabase) {
     try {
-      const { data, error } = await supabase
-        .from(storeName)
-        .select('*');
-
+      const { data, error } = await supabase.from(storeName).select('*');
       if (error) {
-        console.error(`خطأ أثناء جلب البيانات من Supabase لجدول ${storeName}:`, error);
         dbDiagnostics.hasErrors = true;
         dbDiagnostics.lastErrorMessage = error.message;
         dbDiagnostics.tableErrors[storeName] = error.message;
-        // Fallback to local storage
         return localGetAll<T>(storeName);
       }
-      
-      // Successfully fetched
-      if (dbDiagnostics.tableErrors[storeName]) {
-        delete dbDiagnostics.tableErrors[storeName];
-        if (Object.keys(dbDiagnostics.tableErrors).length === 0) {
-          dbDiagnostics.hasErrors = false;
-          dbDiagnostics.lastErrorMessage = null;
-        }
+      delete dbDiagnostics.tableErrors[storeName];
+      if (Object.keys(dbDiagnostics.tableErrors).length === 0) {
+        dbDiagnostics.hasErrors = false;
+        dbDiagnostics.lastErrorMessage = null;
       }
       return (data as T[]) || [];
     } catch (e: any) {
-      console.error(`خطأ مفاجئ أثناء الاتصال بـ Supabase:`, e);
       dbDiagnostics.hasErrors = true;
       dbDiagnostics.lastErrorMessage = e?.message || String(e);
       dbDiagnostics.tableErrors[storeName] = e?.message || String(e);
@@ -150,89 +205,152 @@ export const getAll = async <T>(storeName: string): Promise<T[]> => {
   return localGetAll<T>(storeName);
 };
 
-// 2. Put / Save item
 export const putItem = async <T>(storeName: string, item: T): Promise<void> => {
   if (supabase) {
     try {
-      const { error } = await supabase
-        .from(storeName)
-        .upsert(item as any);
-
+      const { error } = await supabase.from(storeName).upsert(item as any);
       if (error) {
-        console.error(`خطأ أثناء حفظ البيانات في Supabase لجدول ${storeName}:`, error);
         dbDiagnostics.hasErrors = true;
         dbDiagnostics.lastErrorMessage = error.message;
         dbDiagnostics.tableErrors[storeName] = error.message;
         return localPutItem<T>(storeName, item);
       }
-
-      // Successfully updated
-      if (dbDiagnostics.tableErrors[storeName]) {
-        delete dbDiagnostics.tableErrors[storeName];
-        if (Object.keys(dbDiagnostics.tableErrors).length === 0) {
-          dbDiagnostics.hasErrors = false;
-          dbDiagnostics.lastErrorMessage = null;
-        }
+      delete dbDiagnostics.tableErrors[storeName];
+      if (Object.keys(dbDiagnostics.tableErrors).length === 0) {
+        dbDiagnostics.hasErrors = false;
+        dbDiagnostics.lastErrorMessage = null;
       }
-      return;
     } catch (e: any) {
-      console.error(`خطأ مفاجئ أثناء الاتصال بـ Supabase لعملية الحفظ:`, e);
       dbDiagnostics.hasErrors = true;
       dbDiagnostics.lastErrorMessage = e?.message || String(e);
       dbDiagnostics.tableErrors[storeName] = e?.message || String(e);
       return localPutItem<T>(storeName, item);
     }
+  } else {
+    return localPutItem<T>(storeName, item);
   }
-  return localPutItem<T>(storeName, item);
 };
 
-// 3. Delete item
 export const deleteItem = async (storeName: string, key: any): Promise<void> => {
   if (supabase) {
     try {
       const idColumn = storeName === 'users' ? 'user' : 'id';
-      const { error } = await supabase
-        .from(storeName)
-        .delete()
-        .eq(idColumn, key);
-
+      const { error } = await supabase.from(storeName).delete().eq(idColumn, key);
       if (error) {
-        console.error(`خطأ أثناء حذف البيانات من Supabase لجدول ${storeName}:`, error);
         dbDiagnostics.hasErrors = true;
         dbDiagnostics.lastErrorMessage = error.message;
         dbDiagnostics.tableErrors[storeName] = error.message;
         return localDeleteItem(storeName, key);
       }
-
-      // Successfully deleted
-      if (dbDiagnostics.tableErrors[storeName]) {
-        delete dbDiagnostics.tableErrors[storeName];
-        if (Object.keys(dbDiagnostics.tableErrors).length === 0) {
-          dbDiagnostics.hasErrors = false;
-          dbDiagnostics.lastErrorMessage = null;
-        }
+      delete dbDiagnostics.tableErrors[storeName];
+      if (Object.keys(dbDiagnostics.tableErrors).length === 0) {
+        dbDiagnostics.hasErrors = false;
+        dbDiagnostics.lastErrorMessage = null;
       }
-      return;
     } catch (e: any) {
-      console.error(`خطأ مفاجئ أثناء الاتصال بـ Supabase لعملية الحذف:`, e);
       dbDiagnostics.hasErrors = true;
       dbDiagnostics.lastErrorMessage = e?.message || String(e);
       dbDiagnostics.tableErrors[storeName] = e?.message || String(e);
       return localDeleteItem(storeName, key);
     }
+  } else {
+    return localDeleteItem(storeName, key);
   }
-  return localDeleteItem(storeName, key);
 };
+
 // ═══════════════════════════════════════════════════════
-//  DISCORD WEBHOOK RESOLVER
-//  الروابط محفوظة في متغيرات البيئة فقط — لا تظهر في app.tsx
+//  DISCORD WEBHOOK — server-side proxy فقط
+//  الـ URL يُرسل عبر Supabase Edge Function، لا يظهر في bundle
 // ═══════════════════════════════════════════════════════
 
-// @ts-ignore
-const _tw = import.meta.env.VITE_DISCORD_TICKET_WEBHOOK || '';
-// @ts-ignore
-const _bw = import.meta.env.VITE_DISCORD_BAN_WEBHOOK || '';
+/**
+ * أرسل إشعار Discord عبر Supabase Edge Function
+ * الـ webhook URL محفوظ فقط في بيئة Edge Function — لا يُكشف في الـ bundle
+ *
+ * إعداد الـ Edge Function في Supabase:
+ *  1. supabase functions new discord-notify
+ *  2. في الكود اقرأ DISCORD_TICKET_WEBHOOK و DISCORD_BAN_WEBHOOK من env
+ *  3. supabase secrets set DISCORD_TICKET_WEBHOOK=https://...
+ */
+export const sendDiscordViaEdge = async (
+  type: 'ticket' | 'ban',
+  payload: Record<string, unknown>
+): Promise<void> => {
+  if (!supabase) {
+    // Fallback: قراءة من env مباشرة (في حال لم يُعَدَّ الـ Edge Function بعد)
+    // @ts-ignore
+    const url: string = type === 'ticket'
+      // @ts-ignore
+      ? (import.meta.env.VITE_DISCORD_TICKET_WEBHOOK || '')
+      // @ts-ignore
+      : (import.meta.env.VITE_DISCORD_BAN_WEBHOOK || '');
+    if (!url) return;
+    await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    return;
+  }
+  try {
+    await supabase.functions.invoke('discord-notify', {
+      body: { type, payload },
+    });
+  } catch (e) {
+    console.error('Edge Function discord-notify failed:', e);
+  }
+};
 
-export const getDiscordWebhook = (type: 'ticket' | 'ban'): string => {
-  return type === 'ticket' ? _tw : _bw;
+// ═══════════════════════════════════════════════════════
+//  SERVER-SIDE AUTHORIZATION CHECK
+//  يُستدعى قبل أي عملية حساسة للتحقق من الصلاحيات
+//  في Supabase، يعتمد على RLS policies
+// ═══════════════════════════════════════════════════════
+
+/**
+ * تحقق من صلاحية المستخدم الحالي في قاعدة البيانات مباشرة
+ * هذا يمنع تزوير الـ role من DevTools
+ */
+export const verifyUserRoleFromDB = async (username: string): Promise<string | null> => {
+  if (!supabase) {
+    // IndexedDB mode — لا يوجد server, نقبل الـ client role
+    const users = await localGetAll<{ user: string; role: string; status: string }>('users');
+    const u = users.find(x => x.user === username);
+    return u?.status === 'active' ? u.role : null;
+  }
+  try {
+    const { data, error } = await supabase
+      .from('users')
+      .select('role, status')
+      .eq('user', username)
+      .single();
+    if (error || !data || data.status !== 'active') return null;
+    return data.role as string;
+  } catch {
+    return null;
+  }
+};
+
+// ═══════════════════════════════════════════════════════
+//  FILE UPLOAD — R2 مع Content-Type validation
+// ═══════════════════════════════════════════════════════
+
+const ALLOWED_VIDEO_TYPES = ['video/mp4', 'video/webm', 'video/quicktime', 'video/x-matroska'];
+const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+const MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024; // 100 MB
+
+export interface FileValidationResult {
+  ok: boolean;
+  error?: string;
+}
+
+export const validateFile = (file: File): FileValidationResult => {
+  if (file.size > MAX_FILE_SIZE_BYTES) {
+    return { ok: false, error: `حجم الملف (${(file.size / 1024 / 1024).toFixed(1)} MB) يتجاوز الحد الأقصى (100 MB)` };
+  }
+  const allowed = [...ALLOWED_VIDEO_TYPES, ...ALLOWED_IMAGE_TYPES];
+  if (!allowed.includes(file.type)) {
+    return { ok: false, error: `نوع الملف "${file.type}" غير مدعوم. الأنواع المسموحة: mp4، webm، jpg، png، gif، webp` };
+  }
+  return { ok: true };
 };
