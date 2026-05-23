@@ -1,9 +1,6 @@
 // ═══════════════════════════════════════════════════════
 //  MT LOGS — Supabase Edge Function
 //  discord-notify/index.ts
-//
-//  هذا الملف يعمل على سيرفر Supabase — الـ webhooks
-//  مخفية هنا فقط ولا تظهر أبداً في كود الموقع
 // ═══════════════════════════════════════════════════════
 //
 //  طريقة النشر:
@@ -30,7 +27,7 @@ serve(async (req: Request) => {
 
   try {
     const body = await req.json();
-    const { type } = body;
+    const { type, payload } = body;
 
     // جلب الـ Webhooks من متغيرات البيئة السرية
     const TICKET_WEBHOOK = Deno.env.get("DISCORD_TICKET_WEBHOOK");
@@ -43,53 +40,15 @@ serve(async (req: Request) => {
       );
     }
 
-    let webhookUrl = "";
-    let payload: object = {};
-
-    if (type === "ticket") {
-      const { subject, creator, ticketId } = body;
-      webhookUrl = TICKET_WEBHOOK;
-      payload = {
-        content: "@everyone",
-        embeds: [{
-          title: "🎫 تذكرة جديدة تم فتحها",
-          description: "**يرجاء الاطلاع عليها في أقرب وقت**",
-          color: 0xFF6A00,
-          fields: [
-            { name: "📋 الموضوع", value: `\`\`\`${subject}\`\`\``, inline: false },
-            { name: "🆔 رقم التذكرة", value: `\`${ticketId}\``, inline: true },
-            { name: "👤 بواسطة", value: `\`${creator}\``, inline: true },
-            { name: "\u200b", value: "**يرجى فتح لوحة التذاكر والرد في أقرب وقت ممكن**", inline: false },
-          ],
-          footer: { text: "MT Logs System • نظام التذاكر" },
-          timestamp: new Date().toISOString()
-        }]
-      };
-    } else if (type === "ban") {
-      const { discordId, banType, reason, bannedBy } = body;
-      webhookUrl = BAN_WEBHOOK;
-      payload = {
-        content: "@everyone",
-        embeds: [{
-          title: "🔨 باند جديد تم إضافته",
-          description: "**تم تسجيل حالة باند جديدة في النظام**",
-          color: 0xFF0000,
-          fields: [
-            { name: "🆔 Discord ID", value: `\`\`\`${discordId}\`\`\``, inline: false },
-            { name: "📌 النوع", value: `\`${banType}\``, inline: true },
-            { name: "📝 السبب", value: `\`\`\`${reason}\`\`\``, inline: false },
-            { name: "👮 بواسطة", value: `\`${bannedBy}\``, inline: true },
-          ],
-          footer: { text: "MT Logs System • نظام الباند" },
-          timestamp: new Date().toISOString()
-        }]
-      };
-    } else {
+    if (type !== "ticket" && type !== "ban") {
       return new Response(
         JSON.stringify({ error: "Unknown notification type" }),
         { status: 400, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
       );
     }
+
+    // الـ payload جاهز من app.tsx — نرسله مباشرة لـ Discord
+    const webhookUrl = type === "ticket" ? TICKET_WEBHOOK : BAN_WEBHOOK;
 
     const discordRes = await fetch(webhookUrl, {
       method: "POST",
