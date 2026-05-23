@@ -634,12 +634,12 @@ export default function App() {
       }
 
       if (finalUser.status === 'pending') {
-        setAuthFeedback({ type: 'success', msg: '⏳ الرجاء الانتظار لحين قبول طلبك من المدير' });
+        setAuthFeedback({ type: 'success', msg: '⏳ الرجاء الانتظار لحين قبول طلبك من المسؤولين' });
         return;
       }
 
       if (finalUser.status !== 'active') {
-        setAuthFeedback({ type: 'error', msg: '🚫 هذا الحساب موقوف، تواصل مع المدير' });
+        setAuthFeedback({ type: 'error', msg: '🚫 هذا الحساب موقوف، تواصل مع المسؤولين' });
         return;
       }
 
@@ -708,7 +708,7 @@ export default function App() {
         setRegisterSuccess(false);
         setAuthMode('login');
         setAuthInputs({ user: '', pass: '', role: UserRole.LOGS });
-        setAuthFeedback({ type: 'success', msg: '✅ تم تقديم طلبك — سجل دخولك بعد قبول المدير' });
+        setAuthFeedback({ type: 'success', msg: '✅ تم تقديم طلبك — سجل دخولك بعد قبول المسؤولين' });
       }, 5000);
 
     } catch (err) {
