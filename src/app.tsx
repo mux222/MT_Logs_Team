@@ -34,6 +34,131 @@ const sendDiscordTicketNotification = async (subject: string, creator: string, t
   }
 };
 
+const sendDiscordLogsNotification = async (
+  action: string,
+  details: string,
+  userName: string,
+  banData?: { discordId: string; type: string; reason: string; identifiers?: string },
+  editDiff?: { field: string; from: string; to: string }[],
+  mediaChanges?: { added: { type: 'image' | 'video'; url: string; name?: string }[]; removed: { type: 'image' | 'video'; url: string; name?: string }[] }
+) => {
+  try {
+    const actionColors: Record<string, number> = {
+      'Add Ban':           0xFF0000,
+      'Edit Ban':          0xFF8C00,
+      'Delete Ban':        0xAA0000,
+      'Close Ticket':      0x00AA55,
+      'Claim Ticket':      0x00AAFF,
+      'Approve User':      0x00FF88,
+      'Delete User':       0xFF4444,
+      'Change Role':       0xAA44FF,
+      'Remove Evidence':        0xFF4500,
+      'Remove Image Evidence':  0xFF4500,
+      'Remove Video Evidence':  0xFF6600,
+      'Add Image Evidence':     0x00AA88,
+      'Add Video Evidence':     0x0088FF,
+    };
+    const color = actionColors[action] ?? 0x888888;
+
+    // تحديد عنوان ذكي لحذف الأدلة
+    let title = '';
+    if (['Remove Image Evidence','Remove Video Evidence','Add Image Evidence','Add Video Evidence'].includes(action)) {
+      const icons: Record<string,string> = {
+        'Remove Image Evidence': '🖼️ تم حذف صورة دليل',
+        'Remove Video Evidence': '🎬 تم حذف مقطع دليل',
+        'Add Image Evidence':    '🖼️ تم إضافة صورة دليل',
+        'Add Video Evidence':    '🎬 تم إضافة مقطع دليل',
+      };
+      title = icons[action];
+    } else {
+      const actionIcons: Record<string, string> = {
+        'Add Ban':      '🔨 تم إضافة باند',
+        'Edit Ban':     '✏️ تم تعديل باند',
+        'Delete Ban':   '🗑️ تم حذف باند',
+        'Close Ticket': '🎫 تم إغلاق تذكرة',
+        'Claim Ticket': '📌 تم المطالبة بتذكرة',
+        'Approve User': '✅ تم قبول مستخدم',
+        'Delete User':  '❌ تم حذف مستخدم',
+        'Change Role':  '🔑 تم تغيير الرتبة',
+        'Remove Evidence': '🗑️ تم حذف دليل',
+      };
+      title = actionIcons[action] ?? `📋 ${action}`;
+    }
+
+    const fields: { name: string; value: string; inline: boolean }[] = [];
+
+    if (banData) {
+      fields.push({ name: '🆔 Discord ID', value: `\`\`\`${banData.discordId}\`\`\``, inline: false });
+      fields.push({ name: '📌 نوع الباند', value: `\`${banData.type}\``, inline: true });
+      if (banData.identifiers) {
+        fields.push({ name: '🔗 المعرفات', value: `\`${banData.identifiers}\``, inline: true });
+      }
+      fields.push({ name: '📝 السبب', value: `\`\`\`${banData.reason}\`\`\``, inline: false });
+    } else {
+      fields.push({ name: '📝 التفاصيل', value: `\`\`\`${details}\`\`\``, inline: false });
+    }
+
+    // فروق التعديل
+    if (editDiff && editDiff.length > 0) {
+      const diffText = editDiff.map(d => `**${d.field}**\n🔴 \`${d.from}\`\n🟢 \`${d.to}\``).join('\n\n');
+      fields.push({ name: '🔄 التغييرات', value: diffText, inline: false });
+    }
+
+    // الميديا — نص مع نوع واضح
+    if (mediaChanges) {
+      if (mediaChanges.added.length > 0) {
+        const addedText = mediaChanges.added.map(m =>
+          `${m.type === 'video' ? '🎬 مقطع' : '🖼️ صورة'}: \`${m.name || 'دليل'}\``
+        ).join('\n');
+        fields.push({ name: '➕ أدلة مضافة', value: addedText, inline: true });
+      }
+      if (mediaChanges.removed.length > 0) {
+        const removedText = mediaChanges.removed.map(m =>
+          `${m.type === 'video' ? '🎬 مقطع' : '🖼️ صورة'}: \`${m.name || 'دليل'}\``
+        ).join('\n');
+        fields.push({ name: '➖ أدلة محذوفة', value: removedText, inline: true });
+      }
+    }
+
+    fields.push({ name: '👮 الأدمن المسؤول', value: `\`${userName}\``, inline: false });
+
+    // محاولة إرفاق الصورة في الـ embed
+    // الأولوية: R2 URL (http) ← يظهر مباشرة في Discord
+    // base64 ← نرسله كـ attachment منفصل
+    const removedImages = mediaChanges?.removed.filter(m => m.type === 'image') || [];
+    const addedImages = mediaChanges?.added.filter(m => m.type === 'image') || [];
+    const allImages = [...removedImages, ...addedImages];
+
+    const httpImage = allImages.find(m => m.url.startsWith('http'));
+    const base64Images = allImages.filter(m => m.url.startsWith('data:image'));
+
+    const embeds: any[] = [{
+      title,
+      color,
+      fields,
+      footer: { text: 'MT Logs System • Audit Logs' },
+      timestamp: new Date().toISOString(),
+      ...(httpImage ? { image: { url: httpImage.url } } : {})
+    }];
+
+    // لو في صور base64 — أضف embed إضافي لكل صورة (حتى 4)
+    base64Images.slice(0, 4).forEach((img, i) => {
+      embeds.push({
+        title: `🖼️ معاينة الصورة ${base64Images.length > 1 ? i + 1 : ''}`.trim(),
+        color,
+        image: { url: img.url },
+        footer: { text: img.name || 'دليل محذوف' }
+      });
+    });
+
+    const payload: any = { embeds };
+    await sendDiscordViaEdge('logs', payload);
+  } catch (e) {
+    console.error('Discord logs notification error:', e);
+  }
+};
+
+
 const sendDiscordBanNotification = async (discordId: string, banType: string, reason: string, bannedBy: string) => {
   try {
     const payload = {
@@ -66,7 +191,8 @@ const sendDiscordBanNotification = async (discordId: string, banType: string, re
 // ═══════════════════════════════════════════════════════
 //  SESSION MANAGEMENT — sessionStorage only (no localStorage for session)
 //  - الجلسة لا تُخزَّن في localStorage إلا عند "تذكرني"
-//  - البيانات مشفرة بـ AES-GCM (Web Crypto) وليس XOR
+//  - البيانات مشفرة بـ AES-GCM مع مفتاح مشتق من fingerprint الجهاز
+//  - لا يوجد مفتاح ثابت في الكود
 // ═══════════════════════════════════════════════════════
 
 const SEC = {
@@ -79,18 +205,52 @@ const SEC = {
   LOCKOUT_DURATION: 15 * 60 * 1000,
   SESSION_DURATION: 2 * 60 * 60 * 1000,
   REMEMBER_DURATION: 30 * 24 * 60 * 60 * 1000,
-  // مفتاح ثابت للتشفير — يكفي لبيئة client-side إذا استخدمنا IV عشوائي
-  ENC_KEY_RAW: 'MT_LOGS_AES_KEY_2026_v2_32BytesX!',
 };
 
-// AES-GCM encryption key — تُشتق من ثابت النص مرة واحدة
-let _aesKey: CryptoKey | null = null;
-const getAesKey = async (): Promise<CryptoKey> => {
-  if (_aesKey) return _aesKey;
+/**
+ * يولّد fingerprint للجهاز من خصائص المتصفح
+ * هذا يجعل الجلسة مرتبطة بالجهاز — لا تنفع على جهاز آخر
+ */
+const getDeviceFingerprint = (): string => {
+  const nav = window.navigator;
+  const parts = [
+    nav.userAgent,
+    nav.language,
+    String(nav.hardwareConcurrency || ''),
+    String(screen.width) + 'x' + String(screen.height),
+    String(screen.colorDepth),
+    Intl.DateTimeFormat().resolvedOptions().timeZone,
+  ];
+  return parts.join('||');
+};
+
+/**
+ * يشتق مفتاح AES-GCM من fingerprint الجهاز باستخدام PBKDF2
+ * النتيجة: مفتاح مختلف لكل جهاز، ولا يوجد مفتاح ثابت في الكود
+ */
+const deriveKeyFromFingerprint = async (): Promise<CryptoKey> => {
   const enc = new TextEncoder();
-  const raw = enc.encode(SEC.ENC_KEY_RAW).slice(0, 32);
-  _aesKey = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
-  return _aesKey;
+  const fingerprint = getDeviceFingerprint();
+  // salt ثابت لهذا التطبيق — مو سري لكنه يمنع rainbow tables
+  const salt = enc.encode('MT_LOGS_SALT_2026_v2');
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw', enc.encode(fingerprint), 'PBKDF2', false, ['deriveKey']
+  );
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt, iterations: 100_000, hash: 'SHA-256' },
+    keyMaterial,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+};
+
+// cache المفتاح المشتق لتجنب إعادة الاشتقاق في كل عملية
+let _derivedKey: CryptoKey | null = null;
+const getAesKey = async (): Promise<CryptoKey> => {
+  if (_derivedKey) return _derivedKey;
+  _derivedKey = await deriveKeyFromFingerprint();
+  return _derivedKey;
 };
 
 const encryptData = async (plaintext: string): Promise<string> => {
@@ -98,7 +258,6 @@ const encryptData = async (plaintext: string): Promise<string> => {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const enc = new TextEncoder();
   const cipherBuf = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(plaintext));
-  // نجمع IV + ciphertext في base64 واحد
   const combined = new Uint8Array(iv.byteLength + cipherBuf.byteLength);
   combined.set(iv, 0);
   combined.set(new Uint8Array(cipherBuf), iv.byteLength);
@@ -1050,10 +1209,81 @@ const addBan = async () => {
             updatedAt: Date.now(),
             updatedBy: currentUser.user
           };
-          
+
+          // حساب الفروقات في الحقول النصية
+          const editDiff: { field: string; from: string; to: string }[] = [];
+          if (existing) {
+            if (existing.discordId !== banForm.discordId)
+              editDiff.push({ field: 'Discord ID', from: existing.discordId, to: banForm.discordId });
+            if (existing.type !== banForm.type)
+              editDiff.push({ field: 'النوع', from: existing.type, to: banForm.type });
+            if (existing.reason !== banForm.reason)
+              editDiff.push({ field: 'السبب', from: existing.reason, to: banForm.reason });
+            if ((existing.identifiers || '') !== (banForm.identifiers || ''))
+              editDiff.push({ field: 'المعرفات', from: existing.identifiers || '—', to: banForm.identifiers || '—' });
+          }
+
+          // حساب تغييرات الأدلة
+          const oldEvidence = existing?.evidence || [];
+          const addedMedia = evidence.filter(e => !oldEvidence.some(o => o.url === e.url));
+          const removedMedia = oldEvidence.filter(o => !evidence.some(e => e.url === o.url));
+
           await putItem('bans', newBan);
           setBans(bans.map(b => b.id === editingBanId ? newBan : b));
-          await addAuditLog('Edit Ban', `Edited ban record for Discord ID: ${banForm.discordId} by ${currentUser.user}`);
+
+          const hasTextChanges = editDiff.length > 0;
+          const hasMediaChanges = addedMedia.length > 0 || removedMedia.length > 0;
+
+          if (hasTextChanges) {
+            // تغييرات نصية — رسالة "تعديل باند" مع الفروقات وأي ميديا
+            await addAuditLog('Edit Ban', `Edited ban record for Discord ID: ${banForm.discordId} by ${currentUser.user}`, {
+              discordId: banForm.discordId,
+              type: banForm.type,
+              reason: banForm.reason,
+              identifiers: banForm.identifiers || ''
+            });
+            sendDiscordLogsNotification(
+              'Edit Ban',
+              `Edited ban record for Discord ID: ${banForm.discordId}`,
+              currentUser.user,
+              { discordId: banForm.discordId, type: banForm.type, reason: banForm.reason, identifiers: banForm.identifiers || '' },
+              editDiff,
+              hasMediaChanges ? { added: addedMedia, removed: removedMedia } : undefined
+            ).catch(() => {});
+          } else if (hasMediaChanges) {
+            // تغييرات ميديا فقط — رسائل منفصلة لكل عملية
+            for (const added of addedMedia) {
+              const addAction = added.type === 'video' ? 'Add Video Evidence' : 'Add Image Evidence';
+              const addDetails = `Added ${added.type === 'video' ? 'video' : 'image'} "${added.name || 'دليل'}" to Discord ID: ${banForm.discordId}`;
+              await addAuditLog(addAction, addDetails, {
+                discordId: banForm.discordId, type: banForm.type,
+                reason: banForm.reason, identifiers: banForm.identifiers || ''
+              });
+              sendDiscordLogsNotification(
+                addAction, addDetails, currentUser.user,
+                { discordId: banForm.discordId, type: banForm.type, reason: banForm.reason, identifiers: banForm.identifiers || '' },
+                undefined,
+                { added: [added], removed: [] }
+              ).catch(() => {});
+            }
+            for (const removed of removedMedia) {
+              const remAction = removed.type === 'video' ? 'Remove Video Evidence' : 'Remove Image Evidence';
+              const remDetails = `Removed ${removed.type === 'video' ? 'video' : 'image'} "${removed.name || 'دليل'}" from Discord ID: ${banForm.discordId}`;
+              await addAuditLog(remAction, remDetails, {
+                discordId: banForm.discordId, type: banForm.type,
+                reason: banForm.reason, identifiers: banForm.identifiers || ''
+              });
+              sendDiscordLogsNotification(
+                remAction, remDetails, currentUser.user,
+                { discordId: banForm.discordId, type: banForm.type, reason: banForm.reason, identifiers: banForm.identifiers || '' },
+                undefined,
+                { added: [], removed: [removed] }
+              ).catch(() => {});
+            }
+          } else {
+            // لا تغييرات — سجل بسيط
+            await addAuditLog('Edit Ban', `No changes detected for Discord ID: ${banForm.discordId}`);
+          }
           setShowBanForm(false);
           setEditingBanId(null);
           setBanForm({ discordId: '', type: 'Ban', reason: '', identifiers: '' });
@@ -1072,7 +1302,12 @@ const addBan = async () => {
       };
       await putItem('bans', newBan);
       setBans([newBan, ...bans]);
-      await addAuditLog('Add Ban', `Added new ban record for Discord ID: ${banForm.discordId}`);
+      await addAuditLog('Add Ban', `Added new ban record for Discord ID: ${banForm.discordId}`, {
+        discordId: newBan.discordId,
+        type: newBan.type,
+        reason: newBan.reason,
+        identifiers: newBan.identifiers || ''
+      });
       // إرسال إشعار ديسكورد للباند الجديد
       await sendDiscordBanNotification(newBan.discordId, newBan.type, newBan.reason, currentUser.user);
       setShowBanForm(false);
@@ -1092,11 +1327,28 @@ const addBan = async () => {
       async () => {
         const ban = bans.find(b => b.id === banId);
         if (!ban) return;
+        const removedItem = ban.evidence[index];
         const newEv = ban.evidence.filter((_, i) => i !== index);
         const updated = { ...ban, evidence: newEv };
         await putItem('bans', updated);
         setBans(bans.map(b => b.id === banId ? updated : b));
-        await addAuditLog('Remove Evidence', `Removed evidence at index ${index} from ban ID: ${banId}`);
+        const itemType = removedItem?.type === 'video' ? 'video' : 'image';
+        const removeAction = itemType === 'video' ? 'Remove Video Evidence' : 'Remove Image Evidence';
+        const details = `Removed ${itemType} "${removedItem?.name || 'دليل'}" from Discord ID: ${ban.discordId}`;
+        await addAuditLog(removeAction, details, {
+          discordId: ban.discordId,
+          type: ban.type,
+          reason: ban.reason,
+          identifiers: ban.identifiers || ''
+        });
+        sendDiscordLogsNotification(
+          removeAction,
+          details,
+          currentUser!.user,
+          { discordId: ban.discordId, type: ban.type, reason: ban.reason, identifiers: ban.identifiers || '' },
+          undefined,
+          removedItem ? { added: [], removed: [removedItem] } : undefined
+        ).catch(() => {});
       }
     );
   };
@@ -1113,9 +1365,34 @@ const addBan = async () => {
           setToast({ show: true, msg: '🚫 ليس لديك صلاحية لحذف سجلات الباند' });
           return;
         }
+        // جلب بيانات الباند قبل الحذف عشان نرسلها لـ Discord
+        const banRecord = bans.find(b => b.id === id);
         await deleteItem('bans', id);
         setBans(bans.filter(b => b.id !== id));
-        await addAuditLog('Delete Ban', `Deleted ban record ID: ${id}`);
+        const deletedDetails = banRecord
+          ? `Deleted ban — Discord ID: ${banRecord.discordId} | Type: ${banRecord.type} | Reason: ${banRecord.reason}`
+          : `Deleted ban record ID: ${id}`;
+        const newLog: AuditLog = {
+          id: Date.now(),
+          userId: currentUser!.user,
+          userName: currentUser!.user,
+          action: 'Delete Ban',
+          details: deletedDetails,
+          timestamp: Date.now()
+        };
+        await putItem('audit_logs', newLog);
+        setAuditLogs(prev => [newLog, ...prev]);
+        sendDiscordLogsNotification(
+          'Delete Ban',
+          deletedDetails,
+          currentUser!.user,
+          banRecord ? {
+            discordId: banRecord.discordId,
+            type: banRecord.type,
+            reason: banRecord.reason,
+            identifiers: banRecord.identifiers || ''
+          } : undefined
+        ).catch(() => {});
       }
     );
   };
@@ -1349,7 +1626,11 @@ ${renderIdentifiers(ban.identifiers)}
     }, 600);
   };
 
-  const addAuditLog = async (action: string, details: string) => {
+  const addAuditLog = async (
+    action: string,
+    details: string,
+    banData?: { discordId: string; type: string; reason: string; identifiers?: string }
+  ) => {
     if (!currentUser) return;
     const newLog: AuditLog = {
       id: Date.now(),
@@ -1361,6 +1642,8 @@ ${renderIdentifiers(ban.identifiers)}
     };
     await putItem('audit_logs', newLog);
     setAuditLogs(prev => [newLog, ...prev]);
+    // إرسال إشعار Discord عبر Webhook الـ Logs
+    sendDiscordLogsNotification(action, details, currentUser.user, banData).catch(() => {});
   };
 
   if (loading) return <div className="h-screen w-screen flex items-center justify-center text-orange font-orbitron text-2xl">MT LOGS...</div>;
@@ -1581,7 +1864,15 @@ ${renderIdentifiers(ban.identifiers)}
               <AnimatePresence mode="wait">
                 {authMode === 'login' ? (
                   <motion.div key="login" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="space-y-5">
-                    <input type="text" placeholder="اسم المستخدم" className="input-field focus:border-gold" value={authInputs.user} onChange={e => { setAuthInputs({...authInputs, user: e.target.value}); setAuthFeedback(null); }} />
+                    <input type="text" placeholder="اسم المستخدم (MT بدون كتابة)" className="input-field focus:border-gold" value={authInputs.user} onChange={e => {
+                      let val = e.target.value;
+                      // أضف "MT " تلقائياً لو ما بدأ فيها
+                      if (val.length > 0 && !val.startsWith('MT ') && !val.startsWith('mt ') && !val.startsWith('MT') ) {
+                        val = 'MT ' + val;
+                      }
+                      if (val === 'MT' || val === 'mt') val = 'MT ';
+                      setAuthInputs({...authInputs, user: val}); setAuthFeedback(null);
+                    }} />
                     <input type="password" placeholder="كلمة المرور" className="input-field focus:border-gold" value={authInputs.pass} onChange={e => { setAuthInputs({...authInputs, pass: e.target.value}); setAuthFeedback(null); }} onKeyDown={e => e.key === 'Enter' && handleLogin()} />
                     
                     {/* Remember Me + Rate Limit */}
@@ -1631,7 +1922,14 @@ ${renderIdentifiers(ban.identifiers)}
                   </motion.div>
                 ) : (
                   <motion.div key="register" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="space-y-5">
-                    <input type="text" placeholder="اسم المستخدم الجديد" className="input-field focus:border-gold" value={authInputs.user} onChange={e => { setAuthInputs({...authInputs, user: e.target.value}); setAuthFeedback(null); }} />
+                    <input type="text" placeholder="اسم المستخدم (MT بدون كتابة)" className="input-field focus:border-gold" value={authInputs.user} onChange={e => {
+                      let val = e.target.value;
+                      if (val.length > 0 && !val.startsWith('MT ') && !val.startsWith('mt ') && !val.startsWith('MT')) {
+                        val = 'MT ' + val;
+                      }
+                      if (val === 'MT' || val === 'mt') val = 'MT ';
+                      setAuthInputs({...authInputs, user: val}); setAuthFeedback(null);
+                    }} />
                     <input type="password" placeholder="كلمة المرور" className="input-field focus:border-gold" value={authInputs.pass} onChange={e => { setAuthInputs({...authInputs, pass: e.target.value}); setAuthFeedback(null); }} />
                     <select className="input-field focus:border-gold" value={authInputs.role} onChange={e => { setAuthInputs({...authInputs, role: e.target.value as UserRole}); setAuthFeedback(null); }}>
                       <option value={UserRole.ADMIN}>إداري (Staff)</option>
