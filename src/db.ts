@@ -78,9 +78,41 @@ const supabaseUrl: string = import.meta.env.VITE_SUPABASE_URL || '';
 // @ts-ignore
 const supabaseAnonKey: string = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 
-export const supabase = (supabaseUrl && supabaseAnonKey)
-  ? createClient(supabaseUrl, supabaseAnonKey)
-  : null;
+// المستخدم الحالي — يُحدَّث عند تسجيل الدخول
+let _currentUsername: string = '';
+
+export const setCurrentUsername = (username: string) => {
+  _currentUsername = username;
+};
+
+/**
+ * Supabase client مع header المستخدم في كل طلب
+ * الـ RLS policies تقرأ x-user للتحقق من الصلاحية
+ */
+const makeSupabaseClient = () => {
+  if (!supabaseUrl || !supabaseAnonKey) return null;
+  return createClient(supabaseUrl, supabaseAnonKey, {
+    global: {
+      headers: {
+        'x-user': _currentUsername
+      }
+    }
+  });
+};
+
+export const supabase = makeSupabaseClient();
+
+// للطلبات اللي تحتاج header محدّث (بعد login)
+export const getSupabaseWithUser = (username?: string) => {
+  if (!supabaseUrl || !supabaseAnonKey) return null;
+  return createClient(supabaseUrl, supabaseAnonKey, {
+    global: {
+      headers: {
+        'x-user': username || _currentUsername
+      }
+    }
+  });
+};
 
 // ═══════════════════════════════════════════════════════
 //  SECURITY — PASSWORD HASHING (Argon2id via WASM)
@@ -180,9 +212,10 @@ export const dbDiagnostics: DbDiagnosticInfo = {
 // ═══════════════════════════════════════════════════════
 
 export const getAll = async <T>(storeName: string): Promise<T[]> => {
-  if (supabase) {
+  const client = getSupabaseWithUser();
+  if (client) {
     try {
-      const { data, error } = await supabase.from(storeName).select('*');
+      const { data, error } = await client.from(storeName).select('*');
       if (error) {
         dbDiagnostics.hasErrors = true;
         dbDiagnostics.lastErrorMessage = error.message;
@@ -206,9 +239,10 @@ export const getAll = async <T>(storeName: string): Promise<T[]> => {
 };
 
 export const putItem = async <T>(storeName: string, item: T): Promise<void> => {
-  if (supabase) {
+  const client = getSupabaseWithUser();
+  if (client) {
     try {
-      const { error } = await supabase.from(storeName).upsert(item as any);
+      const { error } = await client.from(storeName).upsert(item as any);
       if (error) {
         dbDiagnostics.hasErrors = true;
         dbDiagnostics.lastErrorMessage = error.message;
@@ -232,10 +266,11 @@ export const putItem = async <T>(storeName: string, item: T): Promise<void> => {
 };
 
 export const deleteItem = async (storeName: string, key: any): Promise<void> => {
-  if (supabase) {
+  const client = getSupabaseWithUser();
+  if (client) {
     try {
       const idColumn = storeName === 'users' ? 'user' : 'id';
-      const { error } = await supabase.from(storeName).delete().eq(idColumn, key);
+      const { error } = await client.from(storeName).delete().eq(idColumn, key);
       if (error) {
         dbDiagnostics.hasErrors = true;
         dbDiagnostics.lastErrorMessage = error.message;
@@ -273,31 +308,56 @@ export const deleteItem = async (storeName: string, key: any): Promise<void> => 
  *  3. supabase secrets set DISCORD_TICKET_WEBHOOK=https://...
  */
 export const sendDiscordViaEdge = async (
-  type: 'ticket' | 'ban',
+  type: 'ticket' | 'ban' | 'logs',
   payload: Record<string, unknown>
 ): Promise<void> => {
-  if (!supabase) {
-    // Fallback: قراءة من env مباشرة (في حال لم يُعَدَّ الـ Edge Function بعد)
+  // @ts-ignore
+  const _supabaseUrl: string = import.meta.env.VITE_SUPABASE_URL || '';
+  // @ts-ignore
+  const _anonKey: string = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+
+  // إذا في Supabase — نرسل عبر Edge Function
+  if (_supabaseUrl && _anonKey) {
+    try {
+      const res = await fetch(`${_supabaseUrl}/functions/v1/discord-notify`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${_anonKey}`,
+          'apikey': _anonKey,
+        },
+        body: JSON.stringify({ type, payload }),
+      });
+      if (!res.ok) {
+        const err = await res.text().catch(() => res.statusText);
+        console.error('discord-notify edge error:', res.status, err);
+      }
+      return;
+    } catch (e) {
+      console.error('Edge Function discord-notify failed:', e);
+      // نكمل للـ fallback أدناه
+    }
+  }
+
+  // Fallback: إرسال مباشر من الـ env (لو ما في Supabase أو فشل الـ Edge)
+  // @ts-ignore
+  const url: string = type === 'ticket'
     // @ts-ignore
-    const url: string = type === 'ticket'
-      // @ts-ignore
-      ? (import.meta.env.VITE_DISCORD_TICKET_WEBHOOK || '')
-      // @ts-ignore
-      : (import.meta.env.VITE_DISCORD_BAN_WEBHOOK || '');
-    if (!url) return;
+    ? (import.meta.env.VITE_DISCORD_TICKET_WEBHOOK || '')
+    : type === 'ban'
+    // @ts-ignore
+    ? (import.meta.env.VITE_DISCORD_BAN_WEBHOOK || '')
+    // @ts-ignore
+    : (import.meta.env.VITE_DISCORD_LOGS_WEBHOOK || '');
+  if (!url) return;
+  try {
     await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    return;
-  }
-  try {
-    await supabase.functions.invoke('discord-notify', {
-      body: { type, payload },
-    });
   } catch (e) {
-    console.error('Edge Function discord-notify failed:', e);
+    console.error('Discord direct webhook failed:', e);
   }
 };
 
