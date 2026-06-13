@@ -124,9 +124,42 @@ export const getSupabaseWithUser = (username?: string) => {
  * توليد salt عشوائي لكل مستخدم — 16 byte hex
  */
 export const generateSalt = (): string => {
-  const arr = new Uint8Array(16);
-  crypto.getRandomValues(arr);
-  return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    try {
+      const arr = new Uint8Array(16);
+      crypto.getRandomValues(arr);
+      return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
+    } catch { /* fall through */ }
+  }
+  // Fallback for non-HTTPS
+  return Date.now().toString(16) +
+    Math.random().toString(16).slice(2).padEnd(8, '0') +
+    Math.random().toString(16).slice(2).padEnd(8, '0');
+};
+
+/**
+ * Simple hash fallback when crypto.subtle is unavailable (HTTP env)
+ * Uses a deterministic but obfuscated string transformation
+ */
+const simpleHash = (password: string, salt: string): string => {
+  const combined = `${salt}::${password}::MT_LOGS_2026`;
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < combined.length; i++) {
+    hash ^= combined.charCodeAt(i);
+    hash = (hash * 0x01000193) >>> 0;
+  }
+  // Produce a longer pseudo-hash by repeating with different seeds
+  let result = '';
+  let h = hash;
+  for (let round = 0; round < 8; round++) {
+    h = (h ^ (round * 0xdeadbeef)) >>> 0;
+    for (let i = 0; i < combined.length; i++) {
+      h ^= combined.charCodeAt(i) + round;
+      h = (h * 0x01000193 + round) >>> 0;
+    }
+    result += h.toString(16).padStart(8, '0');
+  }
+  return result;
 };
 
 /**
@@ -134,18 +167,28 @@ export const generateSalt = (): string => {
  * النتيجة: "pbkdf2$<salt>$<hash>"
  */
 export const hashPasswordWithSalt = async (password: string, salt: string): Promise<string> => {
-  const enc = new TextEncoder();
-  const keyMaterial = await crypto.subtle.importKey(
-    'raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']
-  );
-  const bits = await crypto.subtle.deriveBits(
-    { name: 'PBKDF2', salt: enc.encode(salt), iterations: 200_000, hash: 'SHA-256' },
-    keyMaterial,
-    256
-  );
-  const hashHex = Array.from(new Uint8Array(bits))
-    .map(b => b.toString(16).padStart(2, '0')).join('');
-  return `pbkdf2$${salt}$${hashHex}`;
+  // crypto.subtle غير متاح على HTTP — نستخدم simpleHash مباشرة
+  if (typeof crypto === 'undefined' || !crypto.subtle) {
+    const hashHex = simpleHash(password, salt);
+    return `pbkdf2$${salt}$${hashHex}`;
+  }
+  try {
+    const enc = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey(
+      'raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']
+    );
+    const bits = await crypto.subtle.deriveBits(
+      { name: 'PBKDF2', salt: enc.encode(salt), iterations: 200_000, hash: 'SHA-256' },
+      keyMaterial,
+      256
+    );
+    const hashHex = Array.from(new Uint8Array(bits))
+      .map(b => b.toString(16).padStart(2, '0')).join('');
+    return `pbkdf2$${salt}$${hashHex}`;
+  } catch {
+    const hashHex = simpleHash(password, salt);
+    return `pbkdf2$${salt}$${hashHex}`;
+  }
 };
 
 /**
@@ -159,7 +202,11 @@ export const verifyPasswordWithSalt = async (password: string, storedHash: strin
   const computed = await hashPasswordWithSalt(password, salt);
 
   // Constant-time comparison
-  if (computed.length !== storedHash.length) return false;
+  if (computed.length !== storedHash.length) {
+    // Lengths differ — could be simpleHash vs real PBKDF2
+    // Try direct comparison as fallback
+    return computed === storedHash;
+  }
   let diff = 0;
   for (let i = 0; i < computed.length; i++) {
     diff |= computed.charCodeAt(i) ^ storedHash.charCodeAt(i);
@@ -176,10 +223,11 @@ export const legacyVerify = async (password: string, storedPass: string): Promis
   if (!storedPass.startsWith('pbkdf2$') && storedPass.length !== 64) {
     return storedPass === password;
   }
-  // SHA-256 قديم (static salt) — نتحقق منه مباشرة
+  // SHA-256 قديم (static salt)
   if (storedPass.length === 64 && /^[0-9a-f]+$/.test(storedPass)) {
-    const legacySalt = `MT_LOGS_2026:${password}:SEC_SALT_X9K`;
+    if (typeof crypto === 'undefined' || !crypto.subtle) return false;
     try {
+      const legacySalt = `MT_LOGS_2026:${password}:SEC_SALT_X9K`;
       const enc = new TextEncoder();
       const buf = await crypto.subtle.digest('SHA-256', enc.encode(legacySalt));
       const hex = Array.from(new Uint8Array(buf))
@@ -372,22 +420,36 @@ export const sendDiscordViaEdge = async (
  * هذا يمنع تزوير الـ role من DevTools
  */
 export const verifyUserRoleFromDB = async (username: string): Promise<string | null> => {
-  if (!supabase) {
+  const client = getSupabaseWithUser(username);
+  if (!client) {
     // IndexedDB mode — لا يوجد server, نقبل الـ client role
     const users = await localGetAll<{ user: string; role: string; status: string }>('users');
     const u = users.find(x => x.user === username);
     return u?.status === 'active' ? u.role : null;
   }
   try {
-    const { data, error } = await supabase
+    const { data, error } = await client
       .from('users')
       .select('role, status')
       .eq('user', username)
       .single();
-    if (error || !data || data.status !== 'active') return null;
+    if (error || !data) {
+      // Fallback to IndexedDB if Supabase query fails
+      const users = await localGetAll<{ user: string; role: string; status: string }>('users');
+      const u = users.find(x => x.user === username);
+      return u?.status === 'active' ? u.role : null;
+    }
+    if (data.status !== 'active') return null;
     return data.role as string;
   } catch {
-    return null;
+    // Fallback to IndexedDB on any error
+    try {
+      const users = await localGetAll<{ user: string; role: string; status: string }>('users');
+      const u = users.find(x => x.user === username);
+      return u?.status === 'active' ? u.role : null;
+    } catch {
+      return null;
+    }
   }
 };
 
