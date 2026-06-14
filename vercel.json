@@ -5,7 +5,7 @@
       "headers": [
         {
           "key": "Content-Security-Policy",
-          "value": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https://*.supabase.co https://*.r2.cloudflarestorage.com https://*.cloudflare.com https://i.postimg.cc https://postimg.cc; media-src 'self' blob: https://*.r2.cloudflarestorage.com https://*.supabase.co https://i.postimg.cc https://*.workers.dev; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://*.r2.cloudflarestorage.com https://canary.discord.com https://discord.com https://*.cloudflare.com https://*.workers.dev; frame-ancestors 'none';"
+          "value": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https://*.supabase.co https://*.r2.cloudflarestorage.com https://*.cloudflare.com https://i.postimg.cc https://postimg.cc; media-src 'self' blob: https://*.r2.cloudflarestorage.com https://*.supabase.co https://i.postimg.cc https://*.workers.dev; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://*.r2.cloudflarestorage.com https://*.workers.dev https://canary.discord.com https://discord.com https://*.cloudflare.com; frame-ancestors 'none';"
         },
         {
           "key": "Strict-Transport-Security",
