@@ -4040,7 +4040,7 @@ ${renderIdentifiers(ban.identifiers)}
 
                <div className="flex flex-col items-center">
                  <div className="section-title text-xl text-orange font-bold border-r-4 border-orange pr-4 mb-4 font-orbitron self-start">Leader</div>
-                 <TeamCard img="https://i.postimg.cc/nzVR57gD/Leon.jpg" name="Meshal" role="Leader" />
+                 <TeamCard img="https://i.postimg.cc/P59v0k7m/wwwww.jpg" name="Meshal" role="Leader" />
                </div>
 
                <div>
