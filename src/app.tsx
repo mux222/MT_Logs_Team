@@ -4040,7 +4040,7 @@ ${renderIdentifiers(ban.identifiers)}
 
                <div className="flex flex-col items-center">
                  <div className="section-title text-xl text-orange font-bold border-r-4 border-orange pr-4 mb-4 font-orbitron self-start">Leader</div>
-                 <TeamCard img="https://i.postimg.cc/d7fyWCB1/08dc51c773720277f5ff1070bab6d13e.webp" name="Meshal" role="Leader" />
+                 <TeamCard img="https://i.postimg.cc/nzVR57gD/Leon.jpg" name="Meshal" role="Leader" />
                </div>
 
                <div>
@@ -4050,7 +4050,7 @@ ${renderIdentifiers(ban.identifiers)}
                      { img: "https://i.postimg.cc/1zkPh27V/5ef8b1f0a07e532d9a5e6d46ac6958b8.webp", name: "Qm7md" },
                      { img: "https://i.postimg.cc/d3BKC1sL/03cf8139d358de47d3fbf8fe5bf7c3ef.webp", name: "Saad" },
                      { img: "https://i.postimg.cc/FRSrYNkR/293df0d2a90c6f742af136800d4847f5.webp", name: "Mjeed" },
-                     { img: "https://i.postimg.cc/GBfyMDQ9/770dd8597a42a19217a035305a352aee.webp", name: "Mod" },
+                     { img: "https://i.postimg.cc/2S8xCmTP/c5a488644728e1e6e4461093a36a3358.webp", name: "Mod" },
                      { img: "https://i.postimg.cc/qq0TgndG/a2577322206bb6411d1fcbb4c31a70ae.webp", name: "Rakan" },
                      { img: "https://i.postimg.cc/LqW1yPT8/60b49929b666ef976263261f2d59357d.webp", name: "WL2" },
                      { img: "https://i.postimg.cc/v1KVPnzH/1756a6bd283fd95ccd48509c92e75af6.webp", name: "RT" },
