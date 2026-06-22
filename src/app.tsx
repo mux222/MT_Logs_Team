@@ -5610,24 +5610,24 @@ ${renderIdentifiers(ban.identifiers)}
                  <div className="flex flex-wrap justify-center gap-8 pb-4">
                    <TeamCard img="https://i.postimg.cc/67PvHZ08/ce8f0b8d33b78b374f1bb5befb384664.webp" name="Hazem" role="Manager" />
                    <TeamCard img="https://i.postimg.cc/bGrnHgQn/a600e837cb02c2686385ec98c653b650.webp" name="Abdulmalik" role="Manager" highlight />
-                   <TeamCard img="https://i.postimg.cc/McHBb5yj/1a193e863f6c77744178d5e35aa5b2f4.webp" name="ERIC" role="Manager" />
+                   <TeamCard img="https://i.postimg.cc/YqSVNV34/a08a8e01bef71ad9a7a6d997ff316aac.webp" name="ERIC" role="Manager" />
                  </div>
                </div>
 
                <div className="flex flex-col items-center">
                  <div className="section-title text-xl text-orange font-bold border-r-4 border-orange pr-4 mb-4 font-orbitron self-start">Leader</div>
-                 <TeamCard img="https://i.postimg.cc/d7fyWCB1/08dc51c773720277f5ff1070bab6d13e.webp" name="Meshal" role="Team Leader" />
+                 <TeamCard img="https://i.postimg.cc/Fs9vMDxV/Leon.jpg" name="Meshal" role="Team Leader" />
                </div>
 
                <div>
                  <div className="section-title text-xl text-orange font-bold border-r-4 border-orange pr-4 mb-8 font-orbitron">Members</div>
                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-7 gap-4">
                    {[
-                     { img: "https://i.postimg.cc/B8zKhFgL/e8aae06603194b6be3576ea76bff3281.webp", name: "Qm7md" },
-                     { img: "https://i.postimg.cc/8FY6yvHF/4f061a337c25e1054e07f6e4e35e76b6.webp", name: "Saad" },
-                     { img: "https://i.postimg.cc/KKWM9TNR/9ce4c94a556a96c2bfe1333cb8ee0dc5.webp", name: "Mjeed" },
-                     { img: "https://i.postimg.cc/GBfyMDQ9/770dd8597a42a19217a035305a352aee.webp", name: "Mod" },
-                     { img: "https://i.postimg.cc/JyFkTXqh/a983d12b6e78113d823387c14c442b61.webp", name: "Rakan" },
+                     { img: "https://i.postimg.cc/bv03fHT7/5ef8b1f0a07e532d9a5e6d46ac6958b8.webp", name: "Qm7md" },
+                     { img: "https://i.postimg.cc/G3XgpKCK/03cf8139d358de47d3fbf8fe5bf7c3ef.webp", name: "Saad" },
+                     { img: "https://i.postimg.cc/d146Lsz1/293df0d2a90c6f742af136800d4847f5.webp", name: "Mjeed" },
+                     { img: "https://i.postimg.cc/9QRnK7sy/c5a488644728e1e6e4461093a36a3358.webp", name: "Mod" },
+                     { img: "https://i.postimg.cc/3JPBybbH/20e51a6949fa43427da705e503dd6395.webp", name: "Rakan" },
                      { img: "https://i.postimg.cc/LqW1yPT8/60b49929b666ef976263261f2d59357d.webp", name: "WL2" },
                      { img: "https://i.postimg.cc/v1KVPnzH/1756a6bd283fd95ccd48509c92e75af6.webp", name: "RT" },
                    ].map((m, i) => (
