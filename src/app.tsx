@@ -24,7 +24,7 @@ const sendDiscordTicketNotification = async (subject: string, creator: string, t
           { name: '👤 بواسطة', value: `\`${creator}\``, inline: true },
           { name: '​', value: '**يرجى فتح لوحة التذاكر والرد في أقرب وقت ممكن**', inline: false },
         ],
-        footer: { text: 'MT X LOGS System • نظام التذاكر' },
+        footer: { text: 'MT Logs System • نظام التذاكر' },
         timestamp: new Date().toISOString()
       }]
     };
@@ -136,7 +136,7 @@ const sendDiscordLogsNotification = async (
       title,
       color,
       fields,
-      footer: { text: 'MT X LOGS System • Audit Logs' },
+      footer: { text: 'MT Logs System • Audit Logs' },
       timestamp: new Date().toISOString(),
       ...(httpImage ? { image: { url: httpImage.url } } : {})
     }];
@@ -173,7 +173,7 @@ const sendDiscordBanNotification = async (discordId: string, banType: string, re
           { name: '📝 السبب', value: `\`\`\`${reason}\`\`\``, inline: false },
           { name: '👮 بواسطة', value: `\`${bannedBy}\``, inline: true },
         ],
-        footer: { text: 'MT X LOGS System • نظام الباند' },
+        footer: { text: 'MT Logs System • نظام الباند' },
         timestamp: new Date().toISOString()
       }]
     };
@@ -228,80 +228,56 @@ const getDeviceFingerprint = (): string => {
  * يشتق مفتاح AES-GCM من fingerprint الجهاز باستخدام PBKDF2
  * النتيجة: مفتاح مختلف لكل جهاز، ولا يوجد مفتاح ثابت في الكود
  */
-const deriveKeyFromFingerprint = async (): Promise<CryptoKey | null> => {
-  if (typeof crypto === 'undefined' || !crypto.subtle) return null;
-  try {
-    const enc = new TextEncoder();
-    const fingerprint = getDeviceFingerprint();
-    const salt = enc.encode('MT_LOGS_SALT_2026_v2');
-    const keyMaterial = await crypto.subtle.importKey(
-      'raw', enc.encode(fingerprint), 'PBKDF2', false, ['deriveKey']
-    );
-    return crypto.subtle.deriveKey(
-      { name: 'PBKDF2', salt, iterations: 100_000, hash: 'SHA-256' },
-      keyMaterial,
-      { name: 'AES-GCM', length: 256 },
-      false,
-      ['encrypt', 'decrypt']
-    );
-  } catch { return null; }
+const deriveKeyFromFingerprint = async (): Promise<CryptoKey> => {
+  assertCryptoAvailable();
+  const enc = new TextEncoder();
+  const fingerprint = getDeviceFingerprint();
+  // salt ثابت لهذا التطبيق — مو سري لكنه يمنع rainbow tables
+  const salt = enc.encode('MT_LOGS_SALT_2026_v2');
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw', enc.encode(fingerprint), 'PBKDF2', false, ['deriveKey']
+  );
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt, iterations: 100_000, hash: 'SHA-256' },
+    keyMaterial,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
 };
 
+// cache المفتاح المشتق لتجنب إعادة الاشتقاق في كل عملية
 let _derivedKey: CryptoKey | null = null;
-const getAesKey = async (): Promise<CryptoKey | null> => {
+const getAesKey = async (): Promise<CryptoKey> => {
   if (_derivedKey) return _derivedKey;
   _derivedKey = await deriveKeyFromFingerprint();
   return _derivedKey;
 };
 
 const encryptData = async (plaintext: string): Promise<string> => {
-  if (typeof crypto === 'undefined' || !crypto.subtle) {
-    return 'b64:' + btoa(unescape(encodeURIComponent(plaintext)));
-  }
-  try {
-    const key = await getAesKey();
-    if (!key) return 'b64:' + btoa(unescape(encodeURIComponent(plaintext)));
-    const iv = new Uint8Array(12);
-    crypto.getRandomValues(iv);
-    const enc = new TextEncoder();
-    const cipherBuf = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(plaintext));
-    const combined = new Uint8Array(iv.byteLength + cipherBuf.byteLength);
-    combined.set(iv, 0);
-    combined.set(new Uint8Array(cipherBuf), iv.byteLength);
-    return 'enc:' + btoa(String.fromCharCode(...combined));
-  } catch {
-    return 'b64:' + btoa(unescape(encodeURIComponent(plaintext)));
-  }
+  const key = await getAesKey();
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const enc = new TextEncoder();
+  const cipherBuf = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(plaintext));
+  const combined = new Uint8Array(iv.byteLength + cipherBuf.byteLength);
+  combined.set(iv, 0);
+  combined.set(new Uint8Array(cipherBuf), iv.byteLength);
+  return btoa(String.fromCharCode(...combined));
 };
 
 const decryptData = async (b64: string): Promise<string> => {
-  try {
-    if (b64.startsWith('b64:')) {
-      return decodeURIComponent(escape(atob(b64.slice(4))));
-    }
-    if (typeof crypto === 'undefined' || !crypto.subtle) return '';
-    const raw = b64.startsWith('enc:') ? b64.slice(4) : b64;
-    const key = await getAesKey();
-    if (!key) return '';
-    const combined = Uint8Array.from(atob(raw), c => c.charCodeAt(0));
-    const iv = combined.slice(0, 12);
-    const cipherBuf = combined.slice(12);
-    const decBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, cipherBuf);
-    return new TextDecoder().decode(decBuf);
-  } catch {
-    return '';
-  }
+  const key = await getAesKey();
+  const combined = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  const iv = combined.slice(0, 12);
+  const cipherBuf = combined.slice(12);
+  const decBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, cipherBuf);
+  return new TextDecoder().decode(decBuf);
 };
 
 const generateCSRFToken = (): string => {
-  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
-    try {
-      const arr = new Uint8Array(32);
-      crypto.getRandomValues(arr);
-      return Array.from(arr).map((b: number) => b.toString(16).padStart(2, '0')).join('');
-    } catch { /* fall through */ }
-  }
-  return Date.now().toString(36) + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  const arr = new Uint8Array(32);
+  crypto.getRandomValues(arr);
+  return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
 };
 
 // ── Rate Limiting ──
@@ -397,10 +373,22 @@ const uploadVideoToR2 = async (file: File, fileName: string): Promise<string> =>
   const validation = validateFile(file);
   if (!validation.ok) throw new Error(validation.error);
 
+  // بعض المتصفحات ترسل MIME type فارغ — نحدده من الامتداد كـ fallback
+  const ext = file.name.split('.').pop()?.toLowerCase() || 'mp4';
+  const mimeMap: Record<string, string> = {
+    'mp4': 'video/mp4', 'webm': 'video/webm', 'mov': 'video/quicktime',
+    'mkv': 'video/x-matroska', 'avi': 'video/x-msvideo', 'mpeg': 'video/mpeg',
+    'mpg': 'video/mpeg', 'ogg': 'video/ogg', '3gp': 'video/3gpp',
+    'wmv': 'video/x-ms-wmv', 'flv': 'video/x-flv', 'm4v': 'video/mp4',
+  };
+  const contentType = file.type && file.type !== 'application/octet-stream'
+    ? file.type
+    : (mimeMap[ext] || 'video/mp4');
+
   const response = await fetch(`${WORKER_URL}/${fileName}`, {
     method: 'PUT',
     body: file,
-    headers: { 'Content-Type': file.type },
+    headers: { 'Content-Type': contentType },
   });
   if (!response.ok) throw new Error(await response.text());
   const data = await response.json();
@@ -445,60 +433,45 @@ import {
   Trophy,
   Activity,
   History,
-  ClipboardList
+  ClipboardList,
+  Crosshair,
+  AlertTriangle,
+  Link2,
+  Tag,
+  TrendingUp,
+  Command,
+  ArrowRight,
+  CornerDownLeft,
+  FolderOpen,
+  Fingerprint,
+  Layers,
+  Sparkles,
+  GitBranch,
+  MessageSquareWarning,
+  ShieldX,
+  Lock,
+  Bug,
+  Network,
+  GitMerge,
+  Code,
+  Users2,
+  UserCheck,
+  Database,
+  FileCode,
+  Radio,
+  Cpu,
+  MonitorCheck
 } from 'lucide-react';
-import { User, UserRole, Ticket, Ban, Message, BanEvidence, AuditLog, PersonalNote } from './types';
+import { User, UserRole, Ticket, Ban, Message, BanEvidence, AuditLog, PersonalNote, InvestigationCase, EvidenceItem, CaseEvent, CaseStatus, RiskLevel, EvidenceCategory, AltProfile, YaraRule, PCCheckRecord } from './types';
 import {
   getAll, putItem, deleteItem, supabase, dbDiagnostics,
   hashPasswordWithSalt, verifyPasswordWithSalt, legacyVerify,
-  generateSalt, verifyUserRoleFromDB, validateFile, sendDiscordViaEdge
+  generateSalt, verifyUserRoleFromDB, validateFile, sendDiscordViaEdge,
+  calculateRiskAssessment, globalSearch, assertCryptoAvailable, type RiskAssessment, type SearchResult
 } from './db';
 
-// ── Branding Mark: white X polygon with orange shimmer on outer edge ──
-const BrandX = ({ size = 'md' }: { size?: 'sm' | 'md' | 'lg' }) => {
-  const dims: Record<string, number> = { sm: 20, md: 32, lg: 54 };
-  const dim = dims[size];
-  const scale = dim / 32;
-
-  return (
-    <span className="relative inline-flex items-center justify-center mx-1 align-middle shrink-0" style={{ width: dim, height: dim }}>
-      <svg width={dim} height={dim} viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" style={{ overflow: 'visible' }}>
-        <defs>
-          <filter id="xglow" x="-60%" y="-60%" width="220%" height="220%">
-            <feGaussianBlur stdDeviation="2.5" result="b"/>
-            <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
-          </filter>
-          <style>{`
-            @keyframes xOutline {
-              0%   { stroke-dashoffset: 0; }
-              100% { stroke-dashoffset: -165; }
-            }
-            .xo {
-              fill: none;
-              stroke: #ff6a00;
-              stroke-width: 2;
-              stroke-linecap: round;
-              stroke-linejoin: round;
-              stroke-dasharray: 18 147;
-              animation: xOutline 8s linear infinite;
-              filter: drop-shadow(0 0 5px #ff6a00) drop-shadow(0 0 10px rgba(255,106,0,0.45));
-            }
-          `}</style>
-        </defs>
-
-        {/* White filled X */}
-        <path d="M 4,0 L 16,12.83 L 28,0 L 32,4 L 19.17,16 L 32,28 L 28,32 L 16,19.17 L 4,32 L 0,28 L 12.83,16 L 0,4 Z" fill="white" filter="url(#xglow)"/>
-
-        {/* Orange shimmer traveling around the outer edge of the X */}
-        <path className="xo" d="M 4,0 L 16,12.83 L 28,0 L 32,4 L 19.17,16 L 32,28 L 28,32 L 16,19.17 L 4,32 L 0,28 L 12.83,16 L 0,4 Z"/>
-      </svg>
-    </span>
-  );
-};
-
-
 export default function App() {
-  const [activeSec, setActiveSec] = useState<'home' | 'team' | 'goals' | 'tickets' | 'bans' | 'manage' | 'profile' | 'audit_logs' | 'closed_tickets' | 'my_dashboard' | 'notepad' | 'manager_notes' | 'leaderboard'>('home');
+  const [activeSec, setActiveSec] = useState<'home' | 'team' | 'goals' | 'tickets' | 'bans' | 'manage' | 'profile' | 'audit_logs' | 'closed_tickets' | 'my_dashboard' | 'notepad' | 'manager_notes' | 'leaderboard' | 'investigation_hub' | 'case_tracker' | 'intelligence_room' | 'yara_rules' | 'pc_check'>('home');
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [toast, setToast] = useState<{ show: boolean; msg: string } | null>(null);
   const [showDbDiagnostics, setShowDbDiagnostics] = useState(false);
@@ -519,9 +492,55 @@ export default function App() {
   const [bans, setBans] = useState<Ban[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [personalNotes, setPersonalNotes] = useState<PersonalNote[]>([]);
+  const [cases, setCases] = useState<InvestigationCase[]>([]);
+  const [evidenceItems, setEvidenceItems] = useState<EvidenceItem[]>([]);
+  const [altProfiles, setAltProfiles] = useState<AltProfile[]>([]);
+  const [yaraRules, setYaraRules] = useState<YaraRule[]>([]);
   const [loading, setLoading] = useState(true);
   const [auditLogSearchQuery, setAuditLogSearchQuery] = useState('');
   const [closedTicketsSearchQuery, setClosedTicketsSearchQuery] = useState('');
+
+  // Investigation Hub / Case Tracker / Evidence Center State
+  const [activeCaseId, setActiveCaseId] = useState<number | null>(null);
+  const activeCase = cases.find(c => c.id === activeCaseId) || null;
+  const [caseSearchQuery, setCaseSearchQuery] = useState('');
+  const [caseStatusFilter, setCaseStatusFilter] = useState<CaseStatus | 'all'>('all');
+  const [showNewCaseForm, setShowNewCaseForm] = useState(false);
+  const [newCaseForm, setNewCaseForm] = useState({ discordId: '', playerName: '', title: '', summary: '' });
+  const [caseNoteInput, setCaseNoteInput] = useState('');
+  const [evidenceSearchQuery, setEvidenceSearchQuery] = useState('');
+  const [evidenceCategoryFilter, setEvidenceCategoryFilter] = useState<EvidenceCategory | 'all'>('all');
+  const [showNewEvidenceForm, setShowNewEvidenceForm] = useState(false);
+  const [newEvidenceForm, setNewEvidenceForm] = useState<{ discordId: string; name: string; category: EvidenceCategory; text: string; tags: string; caseId: number | null }>({ discordId: '', name: '', category: 'screenshot', text: '', tags: '', caseId: null });
+  const [newEvidenceFile, setNewEvidenceFile] = useState<File | null>(null);
+  const [linkEvidencePickerCaseId, setLinkEvidencePickerCaseId] = useState<number | null>(null);
+
+  // Intelligence Room State
+  const [irSearchQuery, setIrSearchQuery] = useState('');
+  const [irShowForm, setIrShowForm] = useState(false);
+  const [irEditId, setIrEditId] = useState<number | null>(null);
+  const [irForm, setIrForm] = useState({ primaryId: '', primaryName: '', linkedIds: '', notes: '' });
+  const [irLinkedInput, setIrLinkedInput] = useState('');
+
+  // YARA Rules State
+  const [yaraSearchQuery, setYaraSearchQuery] = useState('');
+  const [yaraShowForm, setYaraShowForm] = useState(false);
+  const [yaraEditId, setYaraEditId] = useState<number | null>(null);
+  const [yaraForm, setYaraForm] = useState({ name: '', description: '', rule: '', tags: '' });
+  const [yaraCopied, setYaraCopied] = useState<number | null>(null);
+
+  // PC-CHECK State
+  const [pcChecks, setPcChecks] = useState<PCCheckRecord[]>([]);
+  const [pcSearchQuery, setPcSearchQuery] = useState('');
+  const [pcFilter, setPcFilter] = useState<'all' | 'cheaters' | 'clean'>('all');
+  const [pcShowForm, setPcShowForm] = useState(false);
+  const [pcEditId, setPcEditId] = useState<number | null>(null);
+  const [pcForm, setPcForm] = useState({ player: '', isCheater: false, pin: '', hwid: '', notes: '' });
+
+  // Command Palette State
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [commandQuery, setCommandQuery] = useState('');
+  const [commandSelectedIndex, setCommandSelectedIndex] = useState(0);
 
   // Auth Inputs
   const [authInputs, setAuthInputs] = useState({ user: '', pass: '', role: UserRole.LOGS });
@@ -574,9 +593,6 @@ export default function App() {
   useEffect(() => {
     const initData = async () => {
       try {
-        // تحقق إذا crypto.subtle متاح — إذا لا، نعيد hash جميع المستخدمين بالـ fallback
-        const cryptoAvailable = typeof crypto !== 'undefined' && !!crypto.subtle;
-
         const u = await getAll<User>('users');
         if (u.length === 0) {
           const salt = generateSalt();
@@ -585,49 +601,38 @@ export default function App() {
           await putItem('users', defaultAdmin);
           setUsers([defaultAdmin]);
         } else {
-          // إذا crypto.subtle غير متاح (HTTP)، نتحقق إذا الهاشات موافقة للـ fallback
-          // نضع flag في sessionStorage لتجنب إعادة الحساب في كل مرة
-          if (!cryptoAvailable && !sessionStorage.getItem('__mt_rehashed__')) {
-            // لا نستطيع إعادة hash بدون معرفة كلمة المرور الأصلية
-            // لكن نضع علامة لاستخدام مقارنة أخف في handleLogin
-            sessionStorage.setItem('__mt_crypto_unavailable__', '1');
-          }
-
           setUsers(u);
-          // Auto-login from saved session
-          try {
-            const session = await loadSession();
-            if (session?.valid) {
-              const savedUser = u.find(usr => usr.user === session.user);
-              if (savedUser && savedUser.status === 'active') {
-                // محاولة التحقق من DB، مع fallback على البيانات المحلية
-                let confirmedRole: string | null = null;
-                try { confirmedRole = await verifyUserRoleFromDB(session.user); } catch { /* ignore */ }
-                if (!confirmedRole) confirmedRole = savedUser.role as string;
-
-                const verifiedUser = { ...savedUser, role: confirmedRole as any };
-                setCurrentUser(verifiedUser);
-                setActiveSec('home');
-                if (verifiedUser.role !== UserRole.ADMIN) setTicketViewMode('all');
-              } else {
-                clearSession();
-              }
+          // Auto-login from saved session (async AES-GCM decryption)
+          const session = await loadSession();
+          if (session?.valid) {
+            // تحقق من الـ role من DB مباشرة — يمنع تزوير الـ role عبر DevTools
+            const confirmedRole = await verifyUserRoleFromDB(session.user);
+            const savedUser = u.find(usr => usr.user === session.user);
+            if (savedUser && savedUser.status === 'active' && confirmedRole) {
+              const verifiedUser = { ...savedUser, role: confirmedRole as any };
+              setCurrentUser(verifiedUser);
+              setActiveSec('home');
+              if (verifiedUser.role !== UserRole.ADMIN) setTicketViewMode('all');
+            } else {
+              clearSession();
             }
-          } catch { clearSession(); }
-
+          }
           // Pre-fill remembered username
-          try {
-            const saved = await getSavedUsername();
-            if (saved) {
-              setAuthInputs(prev => ({ ...prev, user: saved }));
-              setRememberMe(true);
-            }
-          } catch { /* ignore */ }
+          const saved = await getSavedUsername();
+          if (saved) {
+            setAuthInputs(prev => ({ ...prev, user: saved }));
+            setRememberMe(true);
+          }
         }
         setTickets(await getAll<Ticket>('tickets'));
         setBans(await getAll<Ban>('bans'));
         setAuditLogs(await getAll<AuditLog>('audit_logs'));
         setPersonalNotes(await getAll<PersonalNote>('personal_notes'));
+        setCases(await getAll<InvestigationCase>('cases'));
+        setEvidenceItems(await getAll<EvidenceItem>('evidence_items'));
+        setAltProfiles(await getAll<AltProfile>('alt_profiles'));
+        setYaraRules(await getAll<YaraRule>('yara_rules'));
+        setPcChecks(await getAll<PCCheckRecord>('pc_checks'));
       } catch (e) {
         console.error(e);
       } finally {
@@ -742,6 +747,89 @@ export default function App() {
       }
     });
 
+    // Subscribe to investigation cases
+    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'cases' }, (payload) => {
+      if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+        const newCase = payload.new as InvestigationCase;
+        setCases((prev) => {
+          const index = prev.findIndex((c) => String(c.id) === String(newCase.id));
+          if (index > -1) {
+            const next = [...prev];
+            next[index] = newCase;
+            return next;
+          }
+          return [newCase, ...prev];
+        });
+      } else if (payload.eventType === 'DELETE') {
+        const oldCase = payload.old as { id: string | number };
+        setCases((prev) => prev.filter((c) => String(c.id) !== String(oldCase.id)));
+      }
+    });
+
+    // Subscribe to evidence items
+    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'evidence_items' }, (payload) => {
+      if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+        const newEv = payload.new as EvidenceItem;
+        setEvidenceItems((prev) => {
+          const index = prev.findIndex((e) => String(e.id) === String(newEv.id));
+          if (index > -1) {
+            const next = [...prev];
+            next[index] = newEv;
+            return next;
+          }
+          return [newEv, ...prev];
+        });
+      } else if (payload.eventType === 'DELETE') {
+        const oldEv = payload.old as { id: string | number };
+        setEvidenceItems((prev) => prev.filter((e) => String(e.id) !== String(oldEv.id)));
+      }
+    });
+
+    // Subscribe to alt profiles
+    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'alt_profiles' }, (payload) => {
+      if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+        const p = payload.new as AltProfile;
+        setAltProfiles(prev => {
+          const i = prev.findIndex(x => String(x.id) === String(p.id));
+          if (i > -1) { const n = [...prev]; n[i] = p; return n; }
+          return [p, ...prev];
+        });
+      } else if (payload.eventType === 'DELETE') {
+        const old = payload.old as { id: string | number };
+        setAltProfiles(prev => prev.filter(x => String(x.id) !== String(old.id)));
+      }
+    });
+
+    // Subscribe to yara rules
+    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'yara_rules' }, (payload) => {
+      if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+        const r = payload.new as YaraRule;
+        setYaraRules(prev => {
+          const i = prev.findIndex(x => String(x.id) === String(r.id));
+          if (i > -1) { const n = [...prev]; n[i] = r; return n; }
+          return [r, ...prev];
+        });
+      } else if (payload.eventType === 'DELETE') {
+        const old = payload.old as { id: string | number };
+        setYaraRules(prev => prev.filter(x => String(x.id) !== String(old.id)));
+      }
+    });
+
+    // Subscribe to PC-CHECK records
+    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'pc_checks' }, (payload) => {
+      if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+        const r = payload.new as PCCheckRecord;
+        setPcChecks(prev => {
+          const i = prev.findIndex(x => String(x.id) === String(r.id));
+          if (i > -1) { const n = [...prev]; n[i] = r; return n; }
+          return [r, ...prev];
+        });
+      } else if (payload.eventType === 'DELETE') {
+        const old = payload.old as { id: string | number };
+        setPcChecks(prev => prev.filter(x => String(x.id) !== String(old.id)));
+      }
+    });
+
     // Listen for typing indicators
     channel.on('broadcast', { event: 'typing' }, (payload) => {
       const { user, ticketId } = payload.payload;
@@ -769,7 +857,51 @@ export default function App() {
     };
   }, []);
 
-  // Auth Handlers
+  // Command Palette — Ctrl+K / Cmd+K
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        if (currentUser) {
+          setCommandPaletteOpen(prev => !prev);
+          setCommandQuery('');
+          setCommandSelectedIndex(0);
+        }
+      } else if (e.key === 'Escape' && commandPaletteOpen) {
+        setCommandPaletteOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [currentUser, commandPaletteOpen]);
+
+  const commandResults: SearchResult[] = useMemo(() => {
+    if (!commandQuery.trim()) return [];
+    return globalSearch(commandQuery, cases, bans, evidenceItems, altProfiles);
+  }, [commandQuery, cases, bans, evidenceItems, altProfiles]);
+
+  const navigateToSearchResult = (result: SearchResult) => {
+    if (result.kind === 'case') {
+      setActiveCaseId(Number(result.id));
+      setActiveSec('case_tracker');
+    } else if (result.kind === 'ban') {
+      setActiveSec('bans');
+      setBanSearchQuery(result.discordId || '');
+    } else if (result.kind === 'evidence') {
+      setActiveSec('investigation_hub');
+      setCaseSearchQuery(result.discordId || '');
+    } else if (result.kind === 'altProfile') {
+      setActiveSec('intelligence_room');
+      setIrSearchQuery(result.discordId || result.title);
+    } else if (result.kind === 'player') {
+      setActiveSec('investigation_hub');
+      setCaseSearchQuery(result.discordId || '');
+    }
+    setCommandPaletteOpen(false);
+    setCommandQuery('');
+  };
+
+
   const handleLogin = async () => {
     // Rate limit check
     const rl = checkRateLimit();
@@ -811,38 +943,8 @@ export default function App() {
         const isPbkdf2 = storedPass.startsWith('pbkdf2$');
 
         if (isPbkdf2) {
-          const cryptoAvailable = typeof crypto !== 'undefined' && !!crypto.subtle;
-
-          if (cryptoAvailable) {
-            // HTTPS: التحقق الطبيعي بـ PBKDF2
-            authenticated = await verifyPasswordWithSalt(authInputs.pass, storedPass);
-          } else {
-            // HTTP: crypto.subtle غير متاح — نستخدم simpleHash
-            // نحسب الـ hash بنفس الـ salt المخزّن ونقارن
-            const parts = storedPass.split('$');
-            if (parts.length === 3) {
-              const [, salt] = parts;
-              const newHash = await hashPasswordWithSalt(authInputs.pass, salt);
-              // لو الهاش القديم كان PBKDF2 حقيقي (64 hex) والجديد simpleHash (64 hex) — قد يتطابقا بالصدفة
-              // لكن في الغالب لن يتطابقا — في هذه الحالة نعيد hash كلمة المرور بـ simpleHash ونقبل الدخول
-              authenticated = newHash === storedPass;
-
-              if (!authenticated) {
-                // المخزّن كان PBKDF2 حقيقي من HTTPS سابق — لا يمكن التحقق
-                // نقبل الدخول ونُعيد hash كلمة المرور بـ simpleHash لتعمل مستقبلاً على HTTP
-                // ملاحظة: هذا قرار أمني — نفضّل إتاحة الوصول على قفل المستخدمين
-                const newSalt = generateSalt();
-                const rehashed = await hashPasswordWithSalt(authInputs.pass, newSalt);
-                const upgraded = { ...candidate, pass: rehashed };
-                try {
-                  await putItem('users', upgraded);
-                  finalUser = upgraded;
-                  setUsers(prev => prev.map(u => u.user === candidate.user ? upgraded : u));
-                } catch { finalUser = candidate; }
-                authenticated = true; // نقبل الدخول ونُحدِّث الـ hash
-              }
-            }
-          }
+          // كلمة مرور PBKDF2 حديثة — التحقق الصحيح
+          authenticated = await verifyPasswordWithSalt(authInputs.pass, storedPass);
         } else {
           // legacy (SHA-256 قديم أو plain-text) — نتحقق ثم نرقّي فوراً
           authenticated = await legacyVerify(authInputs.pass, storedPass);
@@ -883,28 +985,15 @@ export default function App() {
         return;
       }
 
-      // ✅ دخول ناجح — نحاول التحقق من DB، لكن لا نوقف الدخول إذا فشل
-      let confirmedRole: string | null = null;
-      try {
-        confirmedRole = await verifyUserRoleFromDB(finalUser.user);
-      } catch { /* ignore */ }
-
-      // Fallback: استخدم الـ role من البيانات المحلية مباشرة
+      // ✅ دخول ناجح — نتحقق من الـ role من DB قبل حفظ الجلسة
+      const confirmedRole = await verifyUserRoleFromDB(finalUser.user);
       if (!confirmedRole) {
-        confirmedRole = finalUser.role as string;
+        setAuthFeedback({ type: 'error', msg: '🚫 لم يتمكن النظام من التحقق من صلاحياتك، تواصل مع المسؤولين' });
+        return;
       }
-
       const verifiedFinalUser = { ...finalUser, role: confirmedRole as any };
       clearAttempts();
-
-      // حفظ الجلسة مع fallback إذا فشل encrypt
-      try {
-        await saveSession(verifiedFinalUser.user, verifiedFinalUser.role, rememberMe);
-      } catch {
-        // حتى لو فشل حفظ الجلسة، نكمل الدخول
-        sessionStorage.setItem('__mt_user_fallback__', JSON.stringify({ user: verifiedFinalUser.user, role: verifiedFinalUser.role }));
-      }
-
+      await saveSession(verifiedFinalUser.user, verifiedFinalUser.role, rememberMe);
       setCurrentUser(verifiedFinalUser);
       setAuthInputs({ user: '', pass: '', role: UserRole.LOGS });
       setAuthFeedback(null);
@@ -1756,6 +1845,280 @@ ${renderIdentifiers(ban.identifiers)}
     }, 600);
   };
 
+  // ═══════════════════════════════════════════════════════
+  //  INTELLIGENCE ROOM — Handlers
+  // ═══════════════════════════════════════════════════════
+
+  const irFindProfile = (query: string): AltProfile | null => {
+    const q = query.trim();
+    if (!q) return null;
+    return altProfiles.find(p =>
+      p.primaryId === q || p.linkedIds.includes(q)
+    ) || null;
+  };
+
+  const irSaveProfile = async () => {
+    if (!currentUser) return;
+    const isEdit = irEditId !== null;
+    const old = isEdit ? altProfiles.find(p => p.id === irEditId) : null;
+
+    // Logs Team: يقدر يضيف ملف جديد، ويعدّل فقط الملفات اللي أضافها هو
+    // Manager: صلاحية كاملة بدون قيود
+    if (isEdit && !isManager && old?.createdBy !== currentUser.user) {
+      setToast({ show: true, msg: '🔒 تقدر تعدّل فقط الملفات اللي أضفتها أنت' });
+      setTimeout(() => setToast(null), 3000);
+      return;
+    }
+    if (!irForm.primaryId.trim()) {
+      setToast({ show: true, msg: '❌ الرجاء إدخال Discord ID الأساسي' });
+      setTimeout(() => setToast(null), 3000);
+      return;
+    }
+    const linkedArr = irForm.linkedIds.split(/[\n,\s]+/).map(s => s.trim()).filter(Boolean);
+    const now = Date.now();
+
+    const profile: AltProfile = {
+      id: isEdit ? irEditId! : now,
+      primaryId: irForm.primaryId.trim(),
+      primaryName: irForm.primaryName.trim() || undefined,
+      linkedIds: linkedArr,
+      notes: irForm.notes.trim() || undefined,
+      createdBy: old?.createdBy || currentUser.user,
+      createdAt: old?.createdAt || now,
+      updatedAt: now,
+    };
+    await putItem('alt_profiles', profile);
+    setAltProfiles(prev => {
+      const i = prev.findIndex(p => p.id === profile.id);
+      if (i > -1) { const n = [...prev]; n[i] = profile; return n; }
+      return [profile, ...prev];
+    });
+    const action = isEdit ? 'IR: Edit Profile' : 'IR: Create Profile';
+    const details = isEdit
+      ? `Edited alt profile — Primary: ${profile.primaryId} | Before: ${JSON.stringify({ primaryId: old?.primaryId, linkedIds: old?.linkedIds })} | After: ${JSON.stringify({ primaryId: profile.primaryId, linkedIds: profile.linkedIds })}`
+      : `Created alt profile — Primary: ${profile.primaryId} | Linked IDs: [${linkedArr.join(', ')}]`;
+    await addAuditLog(action, details);
+    setIrShowForm(false);
+    setIrEditId(null);
+    setIrForm({ primaryId: '', primaryName: '', linkedIds: '', notes: '' });
+    setToast({ show: true, msg: isEdit ? '✅ تم تحديث الملف' : '✅ تم إنشاء الملف' });
+    setTimeout(() => setToast(null), 3000);
+  };
+
+  const irEditProfile = (p: AltProfile) => {
+    setIrEditId(p.id);
+    setIrForm({ primaryId: p.primaryId, primaryName: p.primaryName || '', linkedIds: p.linkedIds.join('\n'), notes: p.notes || '' });
+    setIrShowForm(true);
+    setIrLinkedInput('');
+  };
+
+  const irDeleteProfile = async (id: number) => {
+    if (!currentUser) return;
+    if (!isManager) {
+      setToast({ show: true, msg: '🔒 صلاحية الإدارة فقط — لا يمكن لرتبة Logs Team الحذف هنا' });
+      setTimeout(() => setToast(null), 3000);
+      return;
+    }
+    const p = altProfiles.find(x => x.id === id);
+    await deleteItem('alt_profiles', id);
+    setAltProfiles(prev => prev.filter(x => x.id !== id));
+    await addAuditLog('IR: Delete Profile', `Deleted alt profile — Primary: ${p?.primaryId} | Linked: [${p?.linkedIds?.join(', ')}]`);
+    setToast({ show: true, msg: '🗑️ تم حذف الملف' });
+    setTimeout(() => setToast(null), 2500);
+  };
+
+  const irAddLinkedId = async (profileId: number, newId: string) => {
+    const p = altProfiles.find(x => x.id === profileId);
+    if (!p) return;
+    if (!isManager && p.createdBy !== currentUser?.user) {
+      setToast({ show: true, msg: '🔒 تقدر تعدّل فقط الملفات اللي أضفتها أنت' });
+      setTimeout(() => setToast(null), 2500);
+      return;
+    }
+    if (!newId.trim()) return;
+    if (p.linkedIds.includes(newId.trim())) {
+      setToast({ show: true, msg: '⚠️ هذا الـ ID مضاف مسبقاً' });
+      setTimeout(() => setToast(null), 2500);
+      return;
+    }
+    const updated = { ...p, linkedIds: [...p.linkedIds, newId.trim()], updatedAt: Date.now() };
+    await putItem('alt_profiles', updated);
+    setAltProfiles(prev => prev.map(x => x.id === profileId ? updated : x));
+    await addAuditLog('IR: Add Linked ID', `Added linked ID ${newId.trim()} to profile Primary: ${p.primaryId}`);
+  };
+
+  const irRemoveLinkedId = async (profileId: number, removeId: string) => {
+    const p = altProfiles.find(x => x.id === profileId);
+    if (!p) return;
+    if (!isManager && p.createdBy !== currentUser?.user) {
+      setToast({ show: true, msg: '🔒 تقدر تعدّل فقط الملفات اللي أضفتها أنت' });
+      setTimeout(() => setToast(null), 2500);
+      return;
+    }
+    const updated = { ...p, linkedIds: p.linkedIds.filter(id => id !== removeId), updatedAt: Date.now() };
+    await putItem('alt_profiles', updated);
+    setAltProfiles(prev => prev.map(x => x.id === profileId ? updated : x));
+    await addAuditLog('IR: Remove Linked ID', `Removed linked ID ${removeId} from profile Primary: ${p.primaryId}`);
+  };
+
+  // ═══════════════════════════════════════════════════════
+  //  YARA RULES — Handlers
+  // ═══════════════════════════════════════════════════════
+
+  const yaraSave = async () => {
+    if (!currentUser) return;
+    const isEdit = yaraEditId !== null;
+    const old = isEdit ? yaraRules.find(r => r.id === yaraEditId) : null;
+
+    // Logs Team: يقدر يضيف قاعدة جديدة، ويعدّل فقط القواعد اللي أضافها هو
+    // Manager: صلاحية كاملة بدون قيود
+    if (isEdit && !isManager && old?.addedBy !== currentUser.user) {
+      setToast({ show: true, msg: '🔒 تقدر تعدّل فقط القواعد اللي أضفتها أنت' });
+      setTimeout(() => setToast(null), 3000);
+      return;
+    }
+    if (!yaraForm.name.trim() || !yaraForm.rule.trim()) {
+      setToast({ show: true, msg: '❌ الرجاء إدخال اسم القاعدة ونصها' });
+      setTimeout(() => setToast(null), 3000);
+      return;
+    }
+    const tagsArr = yaraForm.tags.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+    const now = Date.now();
+
+    const rule: YaraRule = {
+      id: isEdit ? yaraEditId! : now,
+      name: yaraForm.name.trim(),
+      description: yaraForm.description.trim(),
+      rule: yaraForm.rule,
+      tags: tagsArr,
+      addedBy: old?.addedBy || currentUser.user,
+      createdAt: old?.createdAt || now,
+      updatedAt: now,
+    };
+    await putItem('yara_rules', rule);
+    setYaraRules(prev => {
+      const i = prev.findIndex(r => r.id === rule.id);
+      if (i > -1) { const n = [...prev]; n[i] = rule; return n; }
+      return [rule, ...prev];
+    });
+    const action = isEdit ? 'YARA: Edit Rule' : 'YARA: Add Rule';
+    const details = isEdit
+      ? `Edited YARA rule "${rule.name}" | Before name: ${old?.name}`
+      : `Added new YARA rule: "${rule.name}" | Tags: [${tagsArr.join(', ')}]`;
+    await addAuditLog(action, details);
+    setYaraShowForm(false);
+    setYaraEditId(null);
+    setYaraForm({ name: '', description: '', rule: '', tags: '' });
+    setToast({ show: true, msg: isEdit ? '✅ تم تحديث القاعدة' : '✅ تمت إضافة القاعدة' });
+    setTimeout(() => setToast(null), 3000);
+  };
+
+  const yaraDelete = async (id: number) => {
+    if (!isManager) {
+      setToast({ show: true, msg: '🔒 صلاحية الإدارة فقط — لا يمكن لرتبة Logs Team الحذف هنا' });
+      setTimeout(() => setToast(null), 3000);
+      return;
+    }
+    const r = yaraRules.find(x => x.id === id);
+    await deleteItem('yara_rules', id);
+    setYaraRules(prev => prev.filter(x => x.id !== id));
+    await addAuditLog('YARA: Delete Rule', `Deleted YARA rule: "${r?.name}"`);
+    setToast({ show: true, msg: '🗑️ تم حذف القاعدة' });
+    setTimeout(() => setToast(null), 2500);
+  };
+
+  const yaraCopy = async (rule: YaraRule) => {
+    await navigator.clipboard.writeText(rule.rule);
+    setYaraCopied(rule.id);
+    setTimeout(() => setYaraCopied(null), 2000);
+    await addAuditLog('YARA: Copy Rule', `Copied YARA rule: "${rule.name}"`);
+  };
+
+  // ═══════════════════════════════════════════════════════
+  //  PC-CHECK — Hardware Fingerprint (HWID) Check Records
+  // ═══════════════════════════════════════════════════════
+
+  const pcSaveCheck = async () => {
+    if (!currentUser) return;
+    const isEdit = pcEditId !== null;
+    const old = isEdit ? pcChecks.find(c => c.id === pcEditId) : null;
+
+    // Logs Team: يضيف سجل جديد، ويعدّل فقط السجلات اللي أضافها هو
+    // Manager: صلاحية كاملة بدون قيود
+    if (isEdit && !isManager && old?.checkedBy !== currentUser.user) {
+      setToast({ show: true, msg: '🔒 تقدر تعدّل فقط السجلات اللي أضفتها أنت' });
+      setTimeout(() => setToast(null), 3000);
+      return;
+    }
+    if (!pcForm.player.trim()) {
+      setToast({ show: true, msg: '❌ الرجاء إدخال اسم اللاعب' });
+      setTimeout(() => setToast(null), 3000);
+      return;
+    }
+    const now = Date.now();
+    const record: PCCheckRecord = {
+      id: isEdit ? pcEditId! : now,
+      player: pcForm.player.trim(),
+      isCheater: pcForm.isCheater,
+      pin: pcForm.pin.trim(),
+      hwid: pcForm.hwid.trim(),
+      notes: pcForm.notes.trim() || undefined,
+      checkedBy: old?.checkedBy || currentUser.user,
+      createdAt: old?.createdAt || now,
+      updatedAt: now,
+    };
+    await putItem('pc_checks', record);
+    setPcChecks(prev => {
+      const i = prev.findIndex(c => c.id === record.id);
+      if (i > -1) { const n = [...prev]; n[i] = record; return n; }
+      return [record, ...prev];
+    });
+    const action = isEdit ? 'PC-CHECK: Edit Record' : 'PC-CHECK: Add Record';
+    const details = isEdit
+      ? `Edited PC-CHECK record for player "${record.player}" | HWID: ${record.hwid || '—'}`
+      : `Added PC-CHECK record for player "${record.player}" | Cheater: ${record.isCheater ? 'Yes' : 'No'} | HWID: ${record.hwid || '—'}`;
+    await addAuditLog(action, details);
+    setPcShowForm(false);
+    setPcEditId(null);
+    setPcForm({ player: '', isCheater: false, pin: '', hwid: '', notes: '' });
+    setToast({ show: true, msg: isEdit ? '✅ تم تحديث السجل' : '✅ تم حفظ سجل الفحص' });
+    setTimeout(() => setToast(null), 3000);
+  };
+
+  const pcDeleteCheck = async (id: number) => {
+    if (!isManager) {
+      setToast({ show: true, msg: '🔒 صلاحية الإدارة فقط — لا يمكن لرتبة Logs Team الحذف هنا' });
+      setTimeout(() => setToast(null), 3000);
+      return;
+    }
+    triggerConfirm(
+      'حذف سجل الفحص',
+      'هل أنت متأكد من حذف هذا السجل نهائياً؟',
+      async () => {
+        const r = pcChecks.find(c => c.id === id);
+        await deleteItem('pc_checks', id);
+        setPcChecks(prev => prev.filter(c => c.id !== id));
+        await addAuditLog('PC-CHECK: Delete Record', `Deleted PC-CHECK record for player "${r?.player}"`);
+        setToast({ show: true, msg: '🗑️ تم حذف السجل' });
+        setTimeout(() => setToast(null), 2500);
+      }
+    );
+  };
+
+  const pcStartEdit = (r: PCCheckRecord) => {
+    setPcEditId(r.id);
+    setPcForm({ player: r.player, isCheater: r.isCheater, pin: r.pin, hwid: r.hwid, notes: r.notes || '' });
+    setPcShowForm(true);
+  };
+
+  const filteredPcChecks = useMemo(() => {
+    const q = pcSearchQuery.toLowerCase().trim();
+    return pcChecks
+      .filter(r => pcFilter === 'all' || (pcFilter === 'cheaters' ? r.isCheater : !r.isCheater))
+      .filter(r => !q || `${r.player} ${r.pin} ${r.hwid} ${r.notes || ''}`.toLowerCase().includes(q))
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+  }, [pcChecks, pcSearchQuery, pcFilter]);
+
   const addAuditLog = async (
     action: string,
     details: string,
@@ -1776,11 +2139,249 @@ ${renderIdentifiers(ban.identifiers)}
     sendDiscordLogsNotification(action, details, currentUser.user, banData).catch(() => {});
   };
 
+  // ═══════════════════════════════════════════════════════
+  //  INVESTIGATION HUB / CASE TRACKER — Handlers
+  // ═══════════════════════════════════════════════════════
+
+  const getCaseRisk = (discordId: string): RiskAssessment =>
+    calculateRiskAssessment(discordId, cases, bans, evidenceItems);
+
+  const createCase = async () => {
+    if (!currentUser) return;
+    if (!newCaseForm.discordId.trim() || !newCaseForm.title.trim()) {
+      setToast({ show: true, msg: '❌ الرجاء إدخال Discord ID وعنوان ملف على الأقل' });
+      setTimeout(() => setToast(null), 3500);
+      return;
+    }
+    const risk = getCaseRisk(newCaseForm.discordId.trim());
+    const now = Date.now();
+    const firstEvent: CaseEvent = {
+      id: now,
+      type: 'created',
+      text: `تم فتح ملف بواسطة ${currentUser.user}`,
+      by: currentUser.user,
+      timestamp: now,
+    };
+    const newCase: InvestigationCase = {
+      id: now,
+      discordId: newCaseForm.discordId.trim(),
+      playerName: newCaseForm.playerName.trim() || undefined,
+      title: newCaseForm.title.trim(),
+      status: 'open',
+      riskLevel: risk.level,
+      riskScore: risk.score,
+      summary: newCaseForm.summary.trim() || 'بدون ملخص مبدئي — يُحدَّث أثناء التحقيق.',
+      suggestedAction: risk.suggestedAction,
+      evidenceIds: [],
+      createdBy: currentUser.user,
+      createdAt: now,
+      updatedAt: now,
+      timeline: [firstEvent],
+    };
+    await putItem('cases', newCase);
+    setCases(prev => [newCase, ...prev]);
+    await addAuditLog('Open Case', `فتح ملف جديدة برقم #${newCase.id} للاعب ${newCase.discordId}: ${newCase.title}`);
+    setShowNewCaseForm(false);
+    setNewCaseForm({ discordId: '', playerName: '', title: '', summary: '' });
+    setActiveCaseId(newCase.id);
+    setActiveSec('case_tracker');
+    setToast({ show: true, msg: '✅ تم فتح ملف بنجاح' });
+    setTimeout(() => setToast(null), 3000);
+  };
+
+  const appendCaseEvent = async (caseItem: InvestigationCase, event: Omit<CaseEvent, 'id' | 'timestamp'>) => {
+    const now = Date.now();
+    const newEvent: CaseEvent = { ...event, id: now, timestamp: now };
+    const updated: InvestigationCase = { ...caseItem, timeline: [...caseItem.timeline, newEvent], updatedAt: now };
+    await putItem('cases', updated);
+    setCases(prev => prev.map(c => c.id === updated.id ? updated : c));
+    return updated;
+  };
+
+  const addCaseNote = async () => {
+    if (!activeCase || !currentUser || !caseNoteInput.trim()) return;
+    await appendCaseEvent(activeCase, { type: 'note', text: caseNoteInput.trim(), by: currentUser.user });
+    await addAuditLog('Case Note', `إضافة ملاحظة على ملف #${activeCase.id} (${activeCase.discordId})`);
+    setCaseNoteInput('');
+  };
+
+  const updateCaseStatusHandler = async (status: CaseStatus) => {
+    if (!activeCase || !currentUser) return;
+    const statusLabels: Record<CaseStatus, string> = {
+      open: 'مفتوحة', investigating: 'تحت التحقيق', pending_review: 'بانتظار المراجعة',
+      closed_banned: 'مغلقة — تم الباند', closed_cleared: 'مغلقة — تمت التبرئة',
+    };
+    const updated: InvestigationCase = { ...activeCase, status, updatedAt: Date.now() };
+    await putItem('cases', updated);
+    setCases(prev => prev.map(c => c.id === updated.id ? updated : c));
+    await appendCaseEvent(updated, { type: 'status_change', text: `تغيير حالة ملف إلى: ${statusLabels[status]}`, by: currentUser.user });
+    await addAuditLog('Case Status Change', `تغيير حالة ملف #${activeCase.id} (${activeCase.discordId}) إلى ${statusLabels[status]}`);
+  };
+
+  const refreshCaseRisk = async () => {
+    if (!activeCase || !currentUser) return;
+    const risk = getCaseRisk(activeCase.discordId);
+    if (risk.level === activeCase.riskLevel && risk.score === activeCase.riskScore) {
+      setToast({ show: true, msg: 'ℹ️ مستوى الخطورة لم يتغيّر' });
+      setTimeout(() => setToast(null), 2500);
+      return;
+    }
+    const updated: InvestigationCase = { ...activeCase, riskLevel: risk.level, riskScore: risk.score, suggestedAction: risk.suggestedAction, updatedAt: Date.now() };
+    await putItem('cases', updated);
+    setCases(prev => prev.map(c => c.id === updated.id ? updated : c));
+    await appendCaseEvent(updated, { type: 'risk_change', text: `تحديث تقييم الخطورة إلى ${risk.score}/100 (${risk.level})`, by: currentUser.user });
+  };
+
+  const linkExistingBanToCase = async (banId: number | string) => {
+    if (!activeCase || !currentUser) return;
+    const updated: InvestigationCase = { ...activeCase, linkedBanId: banId, updatedAt: Date.now() };
+    await putItem('cases', updated);
+    setCases(prev => prev.map(c => c.id === updated.id ? updated : c));
+    await appendCaseEvent(updated, { type: 'linked_ban', text: `تم ربط ملف بسجل باند رقم #${banId}`, by: currentUser.user });
+    await addAuditLog('Link Ban to Case', `ربط ملف #${activeCase.id} بسجل الباند #${banId}`);
+  };
+
+  const assignCaseToMe = async () => {
+    if (!activeCase || !currentUser) return;
+    const updated: InvestigationCase = { ...activeCase, assignedTo: currentUser.user, status: activeCase.status === 'open' ? 'investigating' : activeCase.status, updatedAt: Date.now() };
+    await putItem('cases', updated);
+    setCases(prev => prev.map(c => c.id === updated.id ? updated : c));
+    await appendCaseEvent(updated, { type: 'assigned', text: `تم تكليف ${currentUser.user} بمتابعة هذه الملف`, by: currentUser.user });
+    await addAuditLog('Case Assigned', `تكليف ${currentUser.user} ملف #${activeCase.id} (${activeCase.discordId})`);
+  };
+
+  const deleteCase = (caseId: number) => {
+    triggerConfirm(
+      'حذف القضية',
+      'هل أنت متأكد من حذف هذه ملف نهائياً؟ السجل التاريخي سيُفقد.',
+      async () => {
+        if (!currentUser) return;
+        const target = cases.find(c => c.id === caseId);
+        await deleteItem('cases', caseId);
+        setCases(prev => prev.filter(c => c.id !== caseId));
+        if (activeCaseId === caseId) { setActiveCaseId(null); setActiveSec('investigation_hub'); }
+        await addAuditLog('Delete Case', `حذف الملف #${caseId}${target ? ` (${target.discordId})` : ''}`);
+      }
+    );
+  };
+
+  // ── Evidence Intelligence Center ──
+
+  const fileToBase64Generic = (file: File): Promise<string> =>
+    new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => resolve(e.target?.result as string);
+      reader.readAsDataURL(file);
+    });
+
+  const createEvidence = async () => {
+    if (!currentUser) return;
+    if (!newEvidenceForm.name.trim() && !newEvidenceFile && !newEvidenceForm.text.trim()) {
+      setToast({ show: true, msg: '❌ أضف اسماً أو ملفاً أو نصاً للدليل' });
+      setTimeout(() => setToast(null), 3000);
+      return;
+    }
+    let url: string | undefined;
+    let type: EvidenceItem['type'] = newEvidenceForm.text.trim() ? 'text' : 'image';
+
+    try {
+      if (newEvidenceFile) {
+        if (newEvidenceFile.type.startsWith('video')) {
+          const fileExtension = newEvidenceFile.name.split('.').pop();
+          const fileName = `evidence_${Date.now()}_${Math.floor(Math.random() * 1000)}.${fileExtension}`;
+          setToast({ show: true, msg: '⏳ جاري رفع الدليل... يرجى الانتظار.' });
+          url = await uploadVideoToR2(newEvidenceFile, fileName);
+          type = 'video';
+        } else {
+          url = await fileToBase64Generic(newEvidenceFile);
+          type = 'image';
+        }
+      }
+    } catch (e: any) {
+      setToast({ show: true, msg: '❌ فشل رفع الملف: ' + (e?.message || 'خطأ غير متوقع') });
+      setTimeout(() => setToast(null), 4000);
+      return;
+    }
+
+    const now = Date.now();
+    const newEvidence: EvidenceItem = {
+      id: now,
+      caseId: newEvidenceForm.caseId,
+      discordId: newEvidenceForm.discordId.trim() || undefined,
+      type,
+      url,
+      text: newEvidenceForm.text.trim() || undefined,
+      name: newEvidenceForm.name.trim() || undefined,
+      category: newEvidenceForm.category,
+      tags: newEvidenceForm.tags.split(',').map(t => t.trim()).filter(Boolean),
+      addedBy: currentUser.user,
+      createdAt: now,
+    };
+    await putItem('evidence_items', newEvidence);
+    setEvidenceItems(prev => [newEvidence, ...prev]);
+
+    if (newEvidenceForm.caseId) {
+      const linkedCase = cases.find(c => c.id === newEvidenceForm.caseId);
+      if (linkedCase) {
+        const updated: InvestigationCase = { ...linkedCase, evidenceIds: [...linkedCase.evidenceIds, newEvidence.id], updatedAt: now };
+        await putItem('cases', updated);
+        setCases(prev => prev.map(c => c.id === updated.id ? updated : c));
+        await appendCaseEvent(updated, { type: 'evidence_added', text: `إضافة دليل جديد: ${newEvidence.name || newEvidence.category}`, by: currentUser.user });
+      }
+    }
+
+    await addAuditLog('Add Evidence', `إضافة دليل جديد (${newEvidence.category})${newEvidence.discordId ? ` للاعب ${newEvidence.discordId}` : ''}`);
+    setToast({ show: true, msg: '✅ تم حفظ الدليل بنجاح' });
+    setTimeout(() => setToast(null), 3000);
+    setShowNewEvidenceForm(false);
+    setNewEvidenceForm({ discordId: '', name: '', category: 'screenshot', text: '', tags: '', caseId: null });
+    setNewEvidenceFile(null);
+  };
+
+  const linkEvidenceToCase = async (evidenceId: number, caseId: number) => {
+    if (!currentUser) return;
+    const ev = evidenceItems.find(e => e.id === evidenceId);
+    const targetCase = cases.find(c => c.id === caseId);
+    if (!ev || !targetCase) return;
+    const updatedEv: EvidenceItem = { ...ev, caseId };
+    await putItem('evidence_items', updatedEv);
+    setEvidenceItems(prev => prev.map(e => e.id === evidenceId ? updatedEv : e));
+    const updatedCase: InvestigationCase = { ...targetCase, evidenceIds: Array.from(new Set([...targetCase.evidenceIds, evidenceId])), updatedAt: Date.now() };
+    await putItem('cases', updatedCase);
+    setCases(prev => prev.map(c => c.id === caseId ? updatedCase : c));
+    await appendCaseEvent(updatedCase, { type: 'evidence_added', text: `ربط دليل موجود: ${ev.name || ev.category}`, by: currentUser.user });
+    await addAuditLog('Link Evidence', `ربط الدليل #${evidenceId} ملف #${caseId}`);
+    setLinkEvidencePickerCaseId(null);
+    setToast({ show: true, msg: '✅ تم ربط الدليل بالملف' });
+    setTimeout(() => setToast(null), 2500);
+  };
+
+  const deleteEvidence = (evidenceId: number) => {
+    triggerConfirm(
+      'حذف الدليل',
+      'هل أنت متأكد من حذف هذا الدليل نهائياً؟',
+      async () => {
+        if (!currentUser) return;
+        const ev = evidenceItems.find(e => e.id === evidenceId);
+        await deleteItem('evidence_items', evidenceId);
+        setEvidenceItems(prev => prev.filter(e => e.id !== evidenceId));
+        if (ev?.caseId) {
+          const linkedCase = cases.find(c => c.id === ev.caseId);
+          if (linkedCase) {
+            const updated: InvestigationCase = { ...linkedCase, evidenceIds: linkedCase.evidenceIds.filter(id => id !== evidenceId), updatedAt: Date.now() };
+            await putItem('cases', updated);
+            setCases(prev => prev.map(c => c.id === updated.id ? updated : c));
+            await appendCaseEvent(updated, { type: 'evidence_removed', text: `حذف دليل: ${ev?.name || ev?.category}`, by: currentUser.user });
+          }
+        }
+        await addAuditLog('Delete Evidence', `حذف الدليل #${evidenceId}`);
+      }
+    );
+  };
+
   if (loading) return (
     <div className="h-screen w-screen flex items-center justify-center gap-2 text-orange font-orbitron text-2xl">
-      <span>MT</span>
-      <BrandX size="sm" />
-      <span>LOGS...</span>
+      <span>MT LOGS...</span>
     </div>
   );
 
@@ -1872,10 +2473,8 @@ ${renderIdentifiers(ban.identifiers)}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ delay: 0.3 }}
                 >
-                  <h1 className="text-5xl md:text-8xl font-black font-orbitron tracking-[0.25em] text-white flex items-center justify-center gap-3 md:gap-5 flex-wrap">
-                    <span>MT</span>
-                    <BrandX size="lg" />
-                    <span className="text-orange animate-pulse drop-shadow-gold">LOGS</span>
+                  <h1 className="text-5xl md:text-8xl font-black font-orbitron tracking-[0.25em] text-white">
+                    MT <span className="text-orange animate-pulse drop-shadow-gold">LOGS</span>
                   </h1>
                 </motion.div>
                 
@@ -2027,11 +2626,7 @@ ${renderIdentifiers(ban.identifiers)}
                 />
               </div>
 
-              <h1 className="font-orbitron text-4xl font-black tracking-tighter flex items-center justify-center gap-2 flex-wrap">
-                <span>MT</span>
-                {authMode === 'login' && <BrandX size="md" />}
-                <span className="text-orange">{authMode === 'login' ? 'LOGS' : 'JOIN'}</span>
-              </h1>
+              <h1 className="font-orbitron text-4xl font-black tracking-tighter">MT <span className="text-orange">{authMode === 'login' ? 'LOGS' : 'JOIN'}</span></h1>
               
               <AnimatePresence mode="wait">
                 {authFeedback && (
@@ -2154,10 +2749,8 @@ ${renderIdentifiers(ban.identifiers)}
             </div>
           </div>
           <div className="flex flex-col text-right">
-            <div className="font-orbitron font-black text-xl tracking-tighter flex items-center gap-1">
-              <span className="text-orange">LOGS</span>
-              <BrandX size="sm" />
-              <span>MT</span>
+            <div className="font-orbitron font-black text-xl tracking-tighter">
+              MT <span className="text-orange/60 mx-0.5">X</span> <span className="text-orange">LOGS</span>
             </div>
             <div 
               onClick={() => {
@@ -2211,6 +2804,26 @@ ${renderIdentifiers(ban.identifiers)}
           {isStaff && (
             <span className={`nav-link ${activeSec === 'bans' ? 'active' : ''} !text-orange font-bold`} onClick={() => setActiveSec('bans')}>معلومات الباند</span>
           )}
+          {isStaff && (
+            <span className={`nav-link ${activeSec === 'investigation_hub' || activeSec === 'case_tracker' ? 'active' : ''} !text-orange font-bold flex items-center gap-1.5`} onClick={() => { setActiveSec('investigation_hub'); setActiveCaseId(null); }}>
+              <Crosshair size={14} /> Suspicious Profiles
+            </span>
+          )}
+          {isStaff && (
+            <span className={`nav-link ${activeSec === 'intelligence_room' ? 'active' : ''} !text-orange/90 flex items-center gap-1.5`} onClick={() => setActiveSec('intelligence_room')}>
+              <Network size={14} /> Intelligence Room
+            </span>
+          )}
+          {isStaff && (
+            <span className={`nav-link ${activeSec === 'yara_rules' ? 'active' : ''} !text-orange/90 flex items-center gap-1.5`} onClick={() => setActiveSec('yara_rules')}>
+              <FileCode size={14} /> YARA Rules
+            </span>
+          )}
+          {isStaff && (
+            <span className={`nav-link ${activeSec === 'pc_check' ? 'active' : ''} !text-orange/90 flex items-center gap-1.5`} onClick={() => setActiveSec('pc_check')}>
+              <Cpu size={14} /> PC-CHECK
+            </span>
+          )}
           {isManager && (
             <span className={`nav-link ${activeSec === 'audit_logs' ? 'active' : ''} !text-orange/80`} onClick={() => setActiveSec('audit_logs')}>Audit Logs</span>
           )}
@@ -2231,6 +2844,18 @@ ${renderIdentifiers(ban.identifiers)}
         </div>
 
         <div className="flex items-center gap-4">
+          {isStaff && (
+            <button
+              onClick={() => { setCommandPaletteOpen(true); setCommandQuery(''); setCommandSelectedIndex(0); }}
+              className="hidden md:flex items-center gap-2 text-text-dim hover:text-orange hover:border-orange/40 border border-white/10 px-3 py-1.5 rounded-xl text-xs transition-all bg-white/[0.02]"
+            >
+              <Search size={13} />
+              <span>بحث شامل...</span>
+              <span className="flex items-center gap-0.5 text-[9px] font-mono bg-white/5 px-1.5 py-0.5 rounded border border-white/10 ml-1">
+                <Command size={9} />K
+              </span>
+            </button>
+          )}
           <div className="hidden sm:block text-orange font-black border border-orange px-3 py-1 rounded-full text-xs uppercase tracking-widest">
             {currentUser.role}
           </div>
@@ -3440,6 +4065,957 @@ ${renderIdentifiers(ban.identifiers)}
           )}
 
 
+          {/* INVESTIGATION HUB SECTION */}
+          {activeSec === 'investigation_hub' && isStaff && (
+            <motion.div key="investigation_hub" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="space-y-8 px-[4%]" dir="rtl">
+
+              {/* Page explainer header */}
+              <div className="card glow-hover border-r-[6px] border-orange space-y-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 rounded-2xl bg-orange/10 flex items-center justify-center">
+                    <Crosshair className="text-orange" size={24} />
+                  </div>
+                  <h1 className="font-orbitron text-2xl sm:text-3xl font-black"> ملفات تعريف المشبوهين <span className="text-orange"> Suspicious Profiles </span></h1>
+                </div>
+                <p className="text-text-dim text-sm leading-relaxed max-w-3xl">
+                  هذه الصفحة هي نقطة الانطلاق لأي تحقيق في سلوك مشتبه به. كل ملف هنا كيان مستقل عن سجلات الباند — يمكن فتح ملف لمتابعة لاعب مشبوه قبل اتخاذ أي إجراء، وقد ينتهي ملف المشتبه به بإصدار باند فعلي بحقه بعد ثبوت المخالفة، أو بإغلاق الملف وتبرئة اللاعب في حال عدم عدم وجود أدلة كافية تدينه.
+
+                </p>
+                <div className="grid sm:grid-cols-2 gap-3 pt-2">
+                  <div className="p-4 rounded-2xl bg-white/[0.02] border border-white/5">
+                    <p className="text-[11px] font-black text-orange uppercase tracking-widest mb-1">ماذا تستطيع تفعله هنا</p>
+                    <p className="text-xs text-text-dim leading-relaxed">فتح ملف جديدة على أي لاعب مشتبه، تصفح الملفات المفتوحة، ومتابعة مستوى الخطورة المحسوب آلياً.</p>
+                  </div>
+                  <div className="p-4 rounded-2xl bg-white/[0.02] border border-white/5">
+                    <p className="text-[11px] font-black text-orange uppercase tracking-widest mb-1">مثال استخدام</p>
+                    <p className="text-xs text-text-dim leading-relaxed">هل يتكرر اسم اللاعب في عدة بلاغات؟ افتح له ملفًا، واربط جميع الأدلة والمعلومات المتوفرة، ثم راجع الحالة مع المسؤولين أو فريق العمل، مع الاستفادة من اقتراحات النظام وتوصياته للمساعدة في تقييم الحالة واتخاذ الإجراء المناسب.</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Stats row */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                {[
+                  { val: cases.filter(c => c.status === 'open' || c.status === 'investigating').length, label: 'ملفات نشطة', color: 'text-orange' },
+                  { val: cases.filter(c => c.riskLevel === 'critical' || c.riskLevel === 'high').length, label: 'خطورة عالية/حرجة', color: 'text-red' },
+                  { val: cases.filter(c => c.status === 'pending_review').length, label: 'بانتظار المراجعة', color: 'text-amber-400' },
+                  { val: cases.filter(c => c.status === 'closed_banned' || c.status === 'closed_cleared').length, label: 'ملفات مغلقة', color: 'text-emerald-400' },
+                ].map((s, i) => (
+                  <div key={i} className="card glow-hover text-center py-6">
+                    <p className={`text-3xl font-black font-orbitron ${s.color}`}>{s.val}</p>
+                    <p className="text-[11px] text-text-dim mt-1">{s.label}</p>
+                  </div>
+                ))}
+              </div>
+
+              {/* Search + filter + new case */}
+              <div className="flex flex-col md:flex-row gap-4 items-stretch md:items-center">
+                <div className="relative flex-1">
+                  <Search className="absolute right-4 top-1/2 -translate-y-1/2 text-text-dim" size={16} />
+                  <input
+                    value={caseSearchQuery}
+                    onChange={e => setCaseSearchQuery(e.target.value)}
+                    placeholder="بحث بـ Discord ID، اسم اللاعب، أو عنوان الملف..."
+                    className="input-field pr-11"
+                  />
+                </div>
+                <select value={caseStatusFilter} onChange={e => setCaseStatusFilter(e.target.value as any)} className="input-field md:w-56">
+                  <option value="all">كل الحالات</option>
+                  <option value="open">مفتوحة</option>
+                  <option value="investigating">تحت التحقيق</option>
+                  <option value="pending_review">بانتظار المراجعة</option>
+                  <option value="closed_banned">مغلقة — تم الباند</option>
+                  <option value="closed_cleared">مغلقة — تمت التبرئة</option>
+                </select>
+                <button className="btn-orange flex items-center justify-center gap-2 md:w-56" onClick={() => setShowNewCaseForm(true)}>
+                  <PlusCircle size={18} /> فتح ملف جديدة
+                </button>
+              </div>
+
+              {/* Case list */}
+              <div className="grid gap-4">
+                {cases
+                  .filter(c => caseStatusFilter === 'all' || c.status === caseStatusFilter)
+                  .filter(c => {
+                    const q = caseSearchQuery.toLowerCase().trim();
+                    if (!q) return true;
+                    return `${c.discordId} ${c.playerName || ''} ${c.title}`.toLowerCase().includes(q);
+                  })
+                  .sort((a, b) => b.updatedAt - a.updatedAt)
+                  .map(c => {
+                    const riskColors: Record<RiskLevel, string> = {
+                      low: 'text-emerald-400 bg-emerald-400/10 border-emerald-400/20',
+                      medium: 'text-amber-400 bg-amber-400/10 border-amber-400/20',
+                      high: 'text-orange bg-orange/10 border-orange/20',
+                      critical: 'text-red bg-red/10 border-red/20',
+                    };
+                    const statusLabels: Record<CaseStatus, string> = {
+                      open: 'مفتوحة', investigating: 'تحت التحقيق', pending_review: 'بانتظار المراجعة',
+                      closed_banned: 'مغلقة — باند', closed_cleared: 'مغلقة — تبرئة',
+                    };
+                    return (
+                      <div
+                        key={c.id}
+                        className="card glow-hover cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+                        onClick={() => { setActiveCaseId(c.id); setActiveSec('case_tracker'); }}
+                      >
+                        <div className="flex items-center gap-4 min-w-0">
+                          <div className={`w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0 border ${riskColors[c.riskLevel]}`}>
+                            <Crosshair size={18} />
+                          </div>
+                          <div className="min-w-0">
+                            <p className="font-bold text-white truncate">{c.title}</p>
+                            <p className="text-xs text-text-dim font-mono">{c.discordId} {c.playerName ? `• ${c.playerName}` : ''}</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3 flex-wrap">
+                          <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest border ${riskColors[c.riskLevel]}`}>
+                            {c.riskScore}/100 • {c.riskLevel}
+                          </span>
+                          <span className="px-3 py-1 rounded-full text-[10px] font-bold bg-white/5 border border-white/10 text-text-dim">
+                            {statusLabels[c.status]}
+                          </span>
+                          <ChevronLeft size={16} className="text-text-dim" />
+                        </div>
+                      </div>
+                    );
+                  })}
+                {cases.length === 0 && (
+                  <div className="card text-center py-16 text-text-dim">
+                    <Crosshair size={32} className="mx-auto mb-3 opacity-30" />
+                    <p className="text-sm">لا توجد قضايا حالياً — ابدأ بفتح أول ملف تحقيق</p>
+                  </div>
+                )}
+              </div>
+
+              {/* New Case Modal */}
+              <AnimatePresence>
+                {showNewCaseForm && (
+                  <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[150] bg-black/90 backdrop-blur-md flex items-center justify-center p-6" onClick={() => setShowNewCaseForm(false)}>
+                    <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }} className="card max-w-lg w-full space-y-5 border-orange/30" onClick={e => e.stopPropagation()}>
+                      <div className="flex justify-between items-center">
+                        <h3 className="text-xl font-black font-arabic">فتح ملف تحقيق جديدة</h3>
+                        <button onClick={() => setShowNewCaseForm(false)} className="bg-white/5 hover:bg-white/10 p-2 rounded-full"><X size={16} /></button>
+                      </div>
+                      <input className="input-field" placeholder="Discord ID اللاعب المشتبه" value={newCaseForm.discordId} onChange={e => setNewCaseForm({ ...newCaseForm, discordId: e.target.value })} />
+                      <input className="input-field" placeholder="اسم اللاعب (اختياري)" value={newCaseForm.playerName} onChange={e => setNewCaseForm({ ...newCaseForm, playerName: e.target.value })} />
+                      <input className="input-field" placeholder="عنوان مختصر للملف" value={newCaseForm.title} onChange={e => setNewCaseForm({ ...newCaseForm, title: e.target.value })} />
+                      <textarea className="input-field min-h-[100px]" placeholder="ملخص مبدئي للاشتباه (اختياري)" value={newCaseForm.summary} onChange={e => setNewCaseForm({ ...newCaseForm, summary: e.target.value })} />
+                      <button className="btn-gold w-full" onClick={createCase}>فتح ملف</button>
+                    </motion.div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </motion.div>
+          )}
+
+          {/* CASE TRACKER SECTION */}
+          {activeSec === 'case_tracker' && isStaff && (
+            <motion.div key="case_tracker" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="space-y-8 px-[4%]" dir="rtl">
+              {!activeCase ? (
+                <div className="card text-center py-16 text-text-dim space-y-4">
+                  <GitBranch size={32} className="mx-auto opacity-30" />
+                  <p className="text-sm">اختر ملف المشتبه من ملفات المشتبه بهم لمتابعة تفاصيلها</p>
+                  <button className="btn-orange" onClick={() => setActiveSec('investigation_hub')}>الذهاب لملفات المشتبه بهم</button>
+                </div>
+              ) : (() => {
+                const c = activeCase;
+                const riskColors: Record<RiskLevel, string> = {
+                  low: 'text-emerald-400 bg-emerald-400/10 border-emerald-400/20',
+                  medium: 'text-amber-400 bg-amber-400/10 border-amber-400/20',
+                  high: 'text-orange bg-orange/10 border-orange/20',
+                  critical: 'text-red bg-red/10 border-red/20',
+                };
+                const risk = getCaseRisk(c.discordId);
+                const linkedEvidence = evidenceItems.filter(e => c.evidenceIds.includes(e.id));
+                const possibleBans = bans.filter(b => b.discordId === c.discordId);
+                const statusLabels: Record<CaseStatus, string> = {
+                  open: 'مفتوحة', investigating: 'تحت التحقيق', pending_review: 'بانتظار المراجعة',
+                  closed_banned: 'مغلقة — تم الباند', closed_cleared: 'مغلقة — تمت التبرئة',
+                };
+
+                return (
+                  <>
+                    <div className="flex items-center gap-3">
+                      <button onClick={() => { setActiveCaseId(null); setActiveSec('investigation_hub'); }} className="bg-white/5 hover:bg-white/10 p-2.5 rounded-xl transition-all">
+                        <ArrowRight size={18} />
+                      </button>
+                      <div className="flex-1 min-w-0">
+                        <h1 className="font-orbitron text-xl sm:text-2xl font-black truncate">{c.title}</h1>
+                        <p className="text-xs text-text-dim font-mono">{c.discordId} {c.playerName ? `• ${c.playerName}` : ''} • ملف #{c.id}</p>
+                      </div>
+                      <button onClick={() => deleteCase(c.id)} className="bg-red/10 hover:bg-red/20 text-red p-2.5 rounded-xl transition-all flex-shrink-0">
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+
+                    <div className="grid lg:grid-cols-3 gap-6">
+                      {/* Left: main info */}
+                      <div className="lg:col-span-2 space-y-6">
+                        {/* Smart Suspicion Summary */}
+                        <div className={`card space-y-4 border ${riskColors[c.riskLevel]}`}>
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <Sparkles size={18} className="text-orange" />
+                              <h3 className="font-black font-arabic">ملخص الاشتباه الذكي</h3>
+                            </div>
+                            <button onClick={refreshCaseRisk} className="text-[10px] font-bold text-orange hover:underline flex items-center gap-1">
+                              <TrendingUp size={12} /> تحديث التقييم
+                            </button>
+                          </div>
+                          <div className="flex items-center gap-4">
+                            <div className={`px-4 py-2 rounded-2xl font-black font-orbitron text-2xl border ${riskColors[c.riskLevel]}`}>
+                              {c.riskScore}
+                            </div>
+                            <div>
+                              <p className={`text-xs font-black uppercase tracking-widest ${riskColors[c.riskLevel].split(' ')[0]}`}>مستوى الخطورة: {c.riskLevel}</p>
+                              <p className="text-[11px] text-text-dim">من 100 نقطة — محسوبة آلياً من سجل اللاعب</p>
+                            </div>
+                          </div>
+                          <p className="text-xs text-text-dim leading-relaxed">{risk.patternSummary}</p>
+                          {risk.factors.length > 0 && (
+                            <div className="space-y-2 pt-2 border-t border-white/5">
+                              {risk.factors.map((f, i) => (
+                                <div key={i} className="flex items-center justify-between text-xs">
+                                  <span className="text-gray-300">{f.label}</span>
+                                  <span className="font-mono text-orange">+{f.points}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          <div className="p-3 rounded-xl bg-orange/5 border border-orange/20 flex items-start gap-2">
+                            <Target size={14} className="text-orange flex-shrink-0 mt-0.5" />
+                            <p className="text-xs text-orange/90 font-bold leading-relaxed">{c.suggestedAction || risk.suggestedAction}</p>
+                          </div>
+                        </div>
+
+                        {/* Summary editable display */}
+                        <div className="card space-y-3">
+                          <h3 className="font-black font-arabic flex items-center gap-2"><FileText size={16} className="text-orange" /> ملخص الملف</h3>
+                          <p className="text-sm text-gray-300 leading-relaxed">{c.summary}</p>
+                        </div>
+
+                        {/* Linked Evidence */}
+                        <div className="card space-y-4">
+                          <div className="flex items-center justify-between">
+                            <h3 className="font-black font-arabic flex items-center gap-2"><Layers size={16} className="text-orange" /> الأدلة المرتبطة ({linkedEvidence.length})</h3>
+                            <button onClick={() => setLinkEvidencePickerCaseId(c.id)} className="text-[11px] font-bold text-orange hover:underline flex items-center gap-1">
+                              <Link2 size={12} /> ربط دليل موجود
+                            </button>
+                          </div>
+                          {linkedEvidence.length === 0 ? (
+                            <p className="text-xs text-text-dim text-center py-6">لا توجد أدلة مرتبطة بعد</p>
+                          ) : (
+                            <div className="grid sm:grid-cols-2 gap-3">
+                              {linkedEvidence.map(ev => (
+                                <div key={ev.id} className="p-3 rounded-xl bg-white/[0.02] border border-white/5 flex items-center gap-3">
+                                  {/* Thumbnail / preview trigger */}
+                                  <div
+                                    className={`w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 text-orange overflow-hidden ${ev.url && (ev.type === 'image' || ev.type === 'video') ? 'cursor-pointer hover:opacity-80 transition-opacity bg-black' : 'bg-orange/10'}`}
+                                    onClick={() => {
+                                      if (ev.url && (ev.type === 'image' || ev.type === 'video')) {
+                                        setFullScreenMedia({ url: ev.url, type: ev.type as 'image' | 'video' });
+                                      }
+                                    }}
+                                  >
+                                    {ev.url && ev.type === 'image' ? (
+                                      <img src={ev.url} alt={ev.name} className="w-full h-full object-cover rounded-lg" />
+                                    ) : ev.url && ev.type === 'video' ? (
+                                      <div className="relative w-full h-full flex items-center justify-center bg-black/60 rounded-lg">
+                                        <Video size={14} className="text-orange" />
+                                      </div>
+                                    ) : ev.type === 'video' ? <Video size={14} /> : ev.type === 'image' ? <ImageIcon size={14} /> : <FileText size={14} />}
+                                  </div>
+                                  <div className="min-w-0 flex-1">
+                                    <p className="text-xs font-bold text-white truncate">{ev.name || ev.category}</p>
+                                    <p className="text-[10px] text-text-dim">{ev.category}</p>
+                                  </div>
+                                  {ev.url && (ev.type === 'image' || ev.type === 'video') && (
+                                    <button
+                                      className="flex-shrink-0 text-orange/60 hover:text-orange transition-colors"
+                                      onClick={() => setFullScreenMedia({ url: ev.url!, type: ev.type as 'image' | 'video' })}
+                                    >
+                                      <Eye size={14} />
+                                    </button>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          <button onClick={() => { setNewEvidenceForm(f => ({ ...f, caseId: c.id, discordId: c.discordId })); setShowNewEvidenceForm(true); }} className="w-full text-center text-xs font-bold text-orange/80 hover:text-orange py-2 border border-dashed border-orange/20 rounded-xl transition-colors">
+                            + رفع دليل جديد لهذه الملف
+                          </button>
+                        </div>
+
+                        {/* Linked Bans */}
+                        {possibleBans.length > 0 && (
+                          <div className="card space-y-3">
+                            <h3 className="font-black font-arabic flex items-center gap-2"><Gavel size={16} className="text-orange" /> سجلات باند لنفس اللاعب</h3>
+                            {possibleBans.map(b => (
+                              <div key={b.id} className="flex items-center justify-between p-3 rounded-xl bg-white/[0.02] border border-white/5">
+                                <div>
+                                  <p className="text-xs font-bold text-white">{b.type} — {b.reason.slice(0, 50)}</p>
+                                  <p className="text-[10px] text-text-dim">بواسطة {b.bannedBy}</p>
+                                </div>
+                                {c.linkedBanId === b.id ? (
+                                  <span className="text-[10px] font-black text-emerald-400 bg-emerald-400/10 px-2 py-1 rounded-full">مرتبطة</span>
+                                ) : (
+                                  <button onClick={() => linkExistingBanToCase(b.id)} className="text-[10px] font-bold text-orange hover:underline">ربط بالملف</button>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Timeline */}
+                        <div className="card space-y-4">
+                          <h3 className="font-black font-arabic flex items-center gap-2"><History size={16} className="text-orange" /> السجل التاريخي للملف</h3>
+                          <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
+                            {[...c.timeline].reverse().map(ev => (
+                              <div key={ev.id} className="flex items-start gap-3 text-xs">
+                                <div className="w-2 h-2 rounded-full bg-orange mt-1.5 flex-shrink-0" />
+                                <div>
+                                  <p className="text-gray-300">{ev.text}</p>
+                                  <p className="text-[10px] text-text-dim font-mono">{ev.by} • {new Date(ev.timestamp).toLocaleString('ar-SA')}</p>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="flex gap-2 pt-2 border-t border-white/5">
+                            <input value={caseNoteInput} onChange={e => setCaseNoteInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && addCaseNote()} placeholder="إضافة ملاحظة للسجل..." className="input-field flex-1 !py-2.5 text-xs" />
+                            <button onClick={addCaseNote} className="btn-orange !px-4">إضافة</button>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Right: actions panel */}
+                      <div className="space-y-6">
+                        <div className="card space-y-3">
+                          <h3 className="font-black font-arabic text-sm">حالة الملف</h3>
+                          <select value={c.status} onChange={e => updateCaseStatusHandler(e.target.value as CaseStatus)} className="input-field text-sm">
+                            {Object.entries(statusLabels).map(([k, label]) => (
+                              <option key={k} value={k}>{label}</option>
+                            ))}
+                          </select>
+                          {c.assignedTo ? (
+                            <p className="text-xs text-text-dim">مكلّف بها: <span className="text-orange font-bold">{c.assignedTo}</span></p>
+                          ) : (
+                            <button onClick={assignCaseToMe} className="btn-orange w-full !py-2.5 text-xs">تكليف نفسي بالملف</button>
+                          )}
+                        </div>
+
+                        <div className="card space-y-2 text-xs text-text-dim">
+                          <div className="flex justify-between"><span>أُنشئت بواسطة</span><span className="text-white font-bold">{c.createdBy}</span></div>
+                          <div className="flex justify-between"><span>تاريخ الفتح</span><span className="text-white font-mono">{new Date(c.createdAt).toLocaleDateString('ar-SA')}</span></div>
+                          <div className="flex justify-between"><span>آخر تحديث</span><span className="text-white font-mono">{new Date(c.updatedAt).toLocaleDateString('ar-SA')}</span></div>
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                );
+              })()}
+
+              {/* Link Existing Evidence Picker */}
+              <AnimatePresence>
+                {linkEvidencePickerCaseId !== null && (
+                  <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[150] bg-black/90 backdrop-blur-md flex items-center justify-center p-6" onClick={() => setLinkEvidencePickerCaseId(null)}>
+                    <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }} className="card max-w-lg w-full space-y-4 max-h-[70vh] overflow-y-auto border-orange/30" onClick={e => e.stopPropagation()}>
+                      <div className="flex justify-between items-center sticky top-0 bg-card pb-2">
+                        <h3 className="text-lg font-black font-arabic">اختر دليلاً لربطه بالملف</h3>
+                        <button onClick={() => setLinkEvidencePickerCaseId(null)} className="bg-white/5 hover:bg-white/10 p-2 rounded-full"><X size={16} /></button>
+                      </div>
+                      {evidenceItems.filter(e => !activeCase?.evidenceIds.includes(e.id)).map(ev => (
+                        <div key={ev.id} onClick={() => linkEvidenceToCase(ev.id, linkEvidencePickerCaseId!)} className="p-3 rounded-xl bg-white/[0.02] border border-white/5 hover:border-orange/30 cursor-pointer flex items-center justify-between">
+                          <div>
+                            <p className="text-xs font-bold text-white">{ev.name || ev.category}</p>
+                            <p className="text-[10px] text-text-dim">{ev.discordId || 'بدون لاعب محدد'}</p>
+                          </div>
+                          <Link2 size={14} className="text-orange" />
+                        </div>
+                      ))}
+                      {evidenceItems.length === 0 && <p className="text-xs text-text-dim text-center py-6">لا توجد أدلة في النظام بعد</p>}
+                    </motion.div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              {/* New Evidence Upload — inline inside Case Tracker */}
+              <AnimatePresence>
+                {showNewEvidenceForm && (
+                  <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[150] bg-black/90 backdrop-blur-md flex items-center justify-center p-6 overflow-y-auto" onClick={() => { setShowNewEvidenceForm(false); setNewEvidenceFile(null); }}>
+                    <motion.div initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }} className="card max-w-lg w-full space-y-4 border-orange/30 my-auto" onClick={e => e.stopPropagation()}>
+                      <div className="flex justify-between items-center">
+                        <h3 className="text-xl font-black font-arabic">رفع دليل جديد للملف</h3>
+                        <button onClick={() => { setShowNewEvidenceForm(false); setNewEvidenceFile(null); }} className="bg-white/5 hover:bg-white/10 p-2 rounded-full"><X size={16} /></button>
+                      </div>
+                      {activeCase && (
+                        <div className="text-xs text-text-dim bg-white/[0.02] border border-white/5 rounded-xl px-3 py-2">
+                          مرتبط تلقائياً بالملف <span className="text-orange font-bold">#{activeCase.id}</span> — {activeCase.discordId}
+                        </div>
+                      )}
+                      <input className="input-field" placeholder="اسم الدليل" value={newEvidenceForm.name} onChange={e => setNewEvidenceForm({ ...newEvidenceForm, name: e.target.value })} />
+                      <select className="input-field" value={newEvidenceForm.category} onChange={e => setNewEvidenceForm({ ...newEvidenceForm, category: e.target.value as EvidenceCategory })}>
+                        <option value="screenshot">لقطة شاشة</option>
+                        <option value="cheat_video">مقطع غش</option>
+                        <option value="chat_log">سجل محادثة</option>
+                        <option value="report">بلاغ</option>
+                        <option value="witness">شهادة شاهد</option>
+                        <option value="other">أخرى</option>
+                      </select>
+                      <textarea className="input-field min-h-[80px]" placeholder="نص أو وصف الدليل (اختياري إذا رفعت ملف)" value={newEvidenceForm.text} onChange={e => setNewEvidenceForm({ ...newEvidenceForm, text: e.target.value })} />
+                      <input className="input-field" placeholder="وسوم مفصولة بفاصلة (مثال: هاك, سرعة, ايم بوت)" value={newEvidenceForm.tags} onChange={e => setNewEvidenceForm({ ...newEvidenceForm, tags: e.target.value })} />
+                      <label className="flex items-center gap-2 text-xs text-text-dim cursor-pointer border border-dashed border-white/10 rounded-xl p-3 hover:border-orange/30">
+                        <Paperclip size={14} />
+                        {newEvidenceFile ? newEvidenceFile.name : 'إرفاق صورة أو فيديو (اختياري)'}
+                        <input type="file" accept="image/*,video/*" className="hidden" onChange={e => setNewEvidenceFile(e.target.files?.[0] || null)} />
+                      </label>
+                      <button className="btn-gold w-full" onClick={createEvidence}>حفظ الدليل</button>
+                    </motion.div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </motion.div>
+          )}
+
+          {/* ══ INTELLIGENCE ROOM SECTION ══ */}
+          {activeSec === 'intelligence_room' && isStaff && (
+            <motion.div key="intelligence_room" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="space-y-6 px-[4%]" dir="rtl">
+
+              {/* Header */}
+              <div className="card glow-hover border-r-[6px] border-orange space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-12 h-12 rounded-2xl bg-orange/10 flex items-center justify-center shrink-0">
+                      <Network className="text-orange" size={24} />
+                    </div>
+                    <div>
+                      <h1 className="font-orbitron text-2xl sm:text-3xl font-black">Intelligence <span className="text-orange">Room</span></h1>
+                      <p className="text-text-dim text-xs mt-0.5">إدارة الحسابات المتعددة • Alt Account Tracker</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <span className="bg-orange/10 border border-orange/30 text-orange font-orbitron font-black text-sm px-3 py-1.5 rounded-xl">
+                      {altProfiles.length} ملف
+                    </span>
+                    {isStaff && (
+                      <button className="btn-gold flex items-center gap-2 text-sm" onClick={() => { setIrShowForm(true); setIrEditId(null); setIrForm({ primaryId: '', primaryName: '', linkedIds: '', notes: '' }); }}>
+                        <Plus size={16} /> ملف جديد
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Search */}
+                <div className="relative">
+                  <Search size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-text-dim" />
+                  <input
+                    className="input-field pr-10 text-sm"
+                    placeholder="ابحث بأي Discord ID — أساسي أو مرتبط..."
+                    value={irSearchQuery}
+                    onChange={e => {
+                      setIrSearchQuery(e.target.value);
+                      if (e.target.value.trim()) addAuditLog('IR: Search', `Searched for ID: ${e.target.value.trim()}`);
+                    }}
+                  />
+                </div>
+
+                {/* Search result alert */}
+                {(() => {
+                  const q = irSearchQuery.trim();
+                  if (!q) return null;
+                  const found = irFindProfile(q);
+                  if (!found) return (
+                    <div className="flex items-center gap-2 text-sm text-text-dim bg-white/5 rounded-xl px-4 py-2.5 border border-white/10">
+                      <Search size={14} /> لم يُعثر على هذا الـ Discord ID في أي ملف
+                    </div>
+                  );
+                  const isLinked = found.linkedIds.includes(q) && q !== found.primaryId;
+                  return (
+                    <motion.div initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} className={`flex items-start gap-3 px-4 py-3 rounded-xl border text-sm font-arabic ${isLinked ? 'bg-amber-500/10 border-amber-500/30' : 'bg-orange/10 border-orange/30'}`}>
+                      <AlertTriangle size={16} className={`mt-0.5 shrink-0 ${isLinked ? 'text-amber-400' : 'text-orange'}`} />
+                      <div>
+                        {isLinked
+                          ? <><span className="font-bold text-amber-400">⚠️ تنبيه: حساب متعدد!</span> Discord: <span className="font-mono text-white">{q}</span> مرتبط بالحساب الأساسي <span className="font-mono text-orange">Discord: {found.primaryId}</span>{found.primaryName ? ` (${found.primaryName})` : ''}</>
+                          : <><span className="font-bold text-orange">حساب أساسي موجود:</span> <span className="font-mono">Discord: {found.primaryId}</span>{found.primaryName ? ` — ${found.primaryName}` : ''}</>
+                        }
+                        <div className="text-text-dim text-xs mt-1">حسابات مرتبطة: <span className="font-mono text-white">{found.linkedIds.length ? found.linkedIds.map(id => `Discord: ${id}`).join(' • ') : '—'}</span></div>
+                      </div>
+                    </motion.div>
+                  );
+                })()}
+              </div>
+
+              {/* New/Edit Profile Form */}
+              <AnimatePresence>
+                {irShowForm && isStaff && (
+                  <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="card border border-orange/30 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <h2 className="font-orbitron font-black text-lg">{irEditId ? 'تعديل الملف' : 'ملف جديد'}</h2>
+                      <button onClick={() => { setIrShowForm(false); setIrEditId(null); }} className="bg-white/5 hover:bg-white/10 p-2 rounded-xl transition-all"><X size={16} /></button>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs text-text-dim mb-1.5">Discord ID الأساسي *</label>
+                        <input className="input-field text-sm font-mono" placeholder="مثال: Discord: 123456789" value={irForm.primaryId} onChange={e => setIrForm(f => ({ ...f, primaryId: e.target.value }))} />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-text-dim mb-1.5">اسم اللاعب (اختياري)</label>
+                        <input className="input-field text-sm" placeholder="مثال: NeGuin" value={irForm.primaryName} onChange={e => setIrForm(f => ({ ...f, primaryName: e.target.value }))} />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs text-text-dim mb-1.5">الحسابات المرتبطة — Discord IDs (كل ID في سطر أو مفصول بفاصلة)</label>
+                      <textarea className="input-field text-sm font-mono h-24 resize-none" placeholder={"123456789\n987654321\n112233445"} value={irForm.linkedIds} onChange={e => setIrForm(f => ({ ...f, linkedIds: e.target.value }))} />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-text-dim mb-1.5">ملاحظات (اختياري)</label>
+                      <textarea className="input-field text-sm h-16 resize-none" placeholder="أي معلومات إضافية..." value={irForm.notes} onChange={e => setIrForm(f => ({ ...f, notes: e.target.value }))} />
+                    </div>
+                    <div className="flex gap-3">
+                      <button className="btn-gold flex-1" onClick={irSaveProfile}>{irEditId ? 'حفظ التعديلات' : 'إنشاء الملف'}</button>
+                      <button className="bg-white/5 hover:bg-white/10 px-4 rounded-xl transition-all text-sm" onClick={() => { setIrShowForm(false); setIrEditId(null); }}>إلغاء</button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              {/* Profile Cards */}
+              {(() => {
+                const q = irSearchQuery.trim().toLowerCase();
+                const filtered = altProfiles.filter(p =>
+                  !q ||
+                  p.primaryId.toLowerCase().includes(q) ||
+                  p.linkedIds.some(id => id.toLowerCase().includes(q)) ||
+                  (p.primaryName || '').toLowerCase().includes(q)
+                );
+                if (filtered.length === 0) return (
+                  <div className="card text-center text-text-dim py-12 space-y-3">
+                    <Network size={40} className="mx-auto opacity-20" />
+                    <p className="font-arabic">لا توجد ملفات{q ? ' تطابق البحث' : ''}</p>
+                  </div>
+                );
+                return (
+                  <div className="space-y-4">
+                    {filtered.map(p => {
+                      const [newIdInput, setNewIdInput] = [irLinkedInput, setIrLinkedInput];
+                      return (
+                        <motion.div key={p.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="card glow-hover border border-white/10 space-y-4">
+                          {/* Profile Header */}
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                            <div className="flex items-center gap-3">
+                              <div className="w-10 h-10 rounded-xl bg-orange/10 border border-orange/30 flex items-center justify-center shrink-0">
+                                <UserCheck size={18} className="text-orange" />
+                              </div>
+                              <div>
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="font-orbitron font-black text-sm text-white">{p.primaryName || 'Unknown'}</span>
+                                  <span className="font-mono text-orange text-xs bg-orange/10 px-2 py-0.5 rounded-lg border border-orange/20">Discord: {p.primaryId}</span>
+                                  <span className="text-[10px] text-text-dim bg-white/5 px-2 py-0.5 rounded-lg uppercase tracking-wider">Primary</span>
+                                </div>
+                                <div className="text-[11px] text-text-dim mt-0.5">
+                                  {p.linkedIds.length} حساب مرتبط • بواسطة {p.createdBy} • {new Date(p.createdAt).toLocaleDateString('ar')}
+                                </div>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {(isManager || p.createdBy === currentUser.user) && (
+                                <button onClick={() => irEditProfile(p)} className="bg-white/5 hover:bg-orange/10 hover:text-orange border border-white/10 hover:border-orange/30 px-3 py-1.5 rounded-xl text-xs transition-all flex items-center gap-1.5">
+                                  <Settings size={12} /> تعديل
+                                </button>
+                              )}
+                              {isManager && (
+                                <button onClick={() => irDeleteProfile(p.id)} className="bg-white/5 hover:bg-red-500/10 hover:text-red-400 border border-white/10 hover:border-red-500/30 px-3 py-1.5 rounded-xl text-xs transition-all flex items-center gap-1.5">
+                                  <Trash2 size={12} /> حذف
+                                </button>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Linked IDs */}
+                          <div className="bg-black/20 rounded-xl p-3 border border-white/5 space-y-2">
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="text-[10px] font-bold text-text-dim uppercase tracking-widest font-orbitron">Linked Accounts</span>
+                              <span className="text-xs text-orange font-bold">{p.linkedIds.length} حساب</span>
+                            </div>
+                            {p.linkedIds.length === 0
+                              ? <p className="text-xs text-text-dim text-center py-2">لا توجد حسابات مرتبطة</p>
+                              : (
+                                <div className="flex flex-wrap gap-2">
+                                  {p.linkedIds.map(lid => (
+                                    <div key={lid} className="flex items-center gap-1.5 bg-white/5 border border-white/10 rounded-lg px-2.5 py-1">
+                                      <GitMerge size={11} className="text-orange/60" />
+                                      <span className="font-mono text-xs text-white">Discord: {lid}</span>
+                                      {(isManager || p.createdBy === currentUser?.user) && (
+                                        <button onClick={() => irRemoveLinkedId(p.id, lid)} className="text-text-dim hover:text-red-400 transition-colors ml-1">
+                                          <X size={11} />
+                                        </button>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              )
+                            }
+                            {/* Add new linked ID inline — manager أو صاحب الملف فقط */}
+                            {(isManager || p.createdBy === currentUser?.user) && (
+                              <div className="flex gap-2 mt-2 pt-2 border-t border-white/5">
+                                <input
+                                  className="input-field text-xs font-mono flex-1 py-1.5"
+                                  placeholder="أضف Discord ID مرتبط... مثال: 123456789"
+                                  onKeyDown={e => {
+                                    if (e.key === 'Enter') {
+                                      const val = (e.target as HTMLInputElement).value.trim();
+                                      if (val) { irAddLinkedId(p.id, val); (e.target as HTMLInputElement).value = ''; }
+                                    }
+                                  }}
+                                />
+                                <button
+                                  className="bg-orange/10 hover:bg-orange/20 border border-orange/30 text-orange px-3 rounded-xl text-xs transition-all"
+                                  onClick={e => {
+                                    const inp = (e.currentTarget.previousElementSibling as HTMLInputElement);
+                                    const val = inp.value.trim();
+                                    if (val) { irAddLinkedId(p.id, val); inp.value = ''; }
+                                  }}
+                                >+ إضافة</button>
+                              </div>
+                            )}
+                          </div>
+
+                          {p.notes && (
+                            <div className="text-xs text-text-dim bg-white/5 rounded-xl px-3 py-2 border border-white/5">
+                              <span className="text-orange font-bold">ملاحظة: </span>{p.notes}
+                            </div>
+                          )}
+                        </motion.div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+            </motion.div>
+          )}
+
+          {/* ══ YARA RULES SECTION ══ */}
+          {activeSec === 'yara_rules' && isStaff && (
+            <motion.div key="yara_rules" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="space-y-6 px-[4%]" dir="rtl">
+
+              {/* Header */}
+              <div className="card glow-hover border-r-[6px] border-orange space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-12 h-12 rounded-2xl bg-orange/10 flex items-center justify-center shrink-0">
+                      <FileCode className="text-orange" size={24} />
+                    </div>
+                    <div>
+                      <h1 className="font-orbitron text-2xl sm:text-3xl font-black">YARA <span className="text-orange">Rules</span></h1>
+                      <p className="text-text-dim text-xs mt-0.5">قواعد الكشف والتحليل • Detection & Analysis Rules</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <span className="bg-orange/10 border border-orange/30 text-orange font-orbitron font-black text-sm px-3 py-1.5 rounded-xl">
+                      {yaraRules.length} قاعدة
+                    </span>
+                    {isStaff && (
+                      <button className="btn-gold flex items-center gap-2 text-sm" onClick={() => { setYaraShowForm(true); setYaraEditId(null); setYaraForm({ name: '', description: '', rule: '', tags: '' }); }}>
+                        <Plus size={16} /> قاعدة جديدة
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Search */}
+                <div className="relative">
+                  <Search size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-text-dim" />
+                  <input
+                    className="input-field pr-10 text-sm"
+                    placeholder="ابحث باسم القاعدة أو الوصف أو الـ Tags..."
+                    value={yaraSearchQuery}
+                    onChange={e => {
+                      setYaraSearchQuery(e.target.value);
+                      if (e.target.value.trim()) addAuditLog('YARA: Search', `Searched YARA rules: ${e.target.value.trim()}`);
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* Add/Edit Form */}
+              <AnimatePresence>
+                {yaraShowForm && isStaff && (
+                  <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="card border border-orange/30 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <h2 className="font-orbitron font-black text-lg">{yaraEditId ? 'تعديل القاعدة' : 'إضافة قاعدة YARA'}</h2>
+                      <button onClick={() => { setYaraShowForm(false); setYaraEditId(null); }} className="bg-white/5 hover:bg-white/10 p-2 rounded-xl transition-all"><X size={16} /></button>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs text-text-dim mb-1.5">اسم القاعدة *</label>
+                        <input className="input-field text-sm font-mono" placeholder="مثال: detect_cheat_dll" value={yaraForm.name} onChange={e => setYaraForm(f => ({ ...f, name: e.target.value }))} />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-text-dim mb-1.5">التاغات (مفصولة بفاصلة)</label>
+                        <input className="input-field text-sm" placeholder="cheat, dll, memory" value={yaraForm.tags} onChange={e => setYaraForm(f => ({ ...f, tags: e.target.value }))} />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs text-text-dim mb-1.5">الوصف</label>
+                      <input className="input-field text-sm" placeholder="وصف مختصر للقاعدة..." value={yaraForm.description} onChange={e => setYaraForm(f => ({ ...f, description: e.target.value }))} />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-text-dim mb-1.5">نص القاعدة (YARA) *</label>
+                      <textarea
+                        className="input-field text-sm font-mono h-52 resize-y"
+                        style={{ fontFamily: 'monospace', tabSize: 4, direction: 'ltr', textAlign: 'left' }}
+                        placeholder={"rule detect_example {\n  meta:\n    description = \"...\"\n  strings:\n    $a = \"example\"\n  condition:\n    $a\n}"}
+                        value={yaraForm.rule}
+                        onChange={e => setYaraForm(f => ({ ...f, rule: e.target.value }))}
+                      />
+                    </div>
+                    <div className="flex gap-3">
+                      <button className="btn-gold flex-1" onClick={yaraSave}>{yaraEditId ? 'حفظ التعديلات' : 'إضافة القاعدة'}</button>
+                      <button className="bg-white/5 hover:bg-white/10 px-4 rounded-xl transition-all text-sm" onClick={() => { setYaraShowForm(false); setYaraEditId(null); }}>إلغاء</button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              {/* Rules Grid */}
+              {(() => {
+                const q = yaraSearchQuery.trim().toLowerCase();
+                const filtered = yaraRules.filter(r =>
+                  !q ||
+                  r.name.toLowerCase().includes(q) ||
+                  r.description.toLowerCase().includes(q) ||
+                  r.tags.some(t => t.toLowerCase().includes(q))
+                );
+                if (filtered.length === 0) return (
+                  <div className="card text-center text-text-dim py-12 space-y-3">
+                    <FileCode size={40} className="mx-auto opacity-20" />
+                    <p className="font-arabic">لا توجد قواعد YARA{q ? ' تطابق البحث' : ''}.</p>
+                    {isStaff && !yaraShowForm && <button className="btn-gold text-sm mt-2" onClick={() => setYaraShowForm(true)}>+ أضف أول قاعدة</button>}
+                  </div>
+                );
+                return (
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    {filtered.map(r => (
+                      <motion.div key={r.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="card glow-hover border border-white/10 space-y-3">
+                        {/* Rule Header */}
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <div className="w-8 h-8 rounded-lg bg-orange/10 flex items-center justify-center shrink-0">
+                              <Code size={14} className="text-orange" />
+                            </div>
+                            <div className="min-w-0">
+                              <div className="font-orbitron font-black text-sm text-white truncate">{r.name}</div>
+                              <div className="text-[11px] text-text-dim">بواسطة {r.addedBy} • {new Date(r.createdAt).toLocaleDateString('ar')}</div>
+                            </div>
+                          </div>
+                          {/* Action buttons */}
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              onClick={() => yaraCopy(r)}
+                              className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-xl border transition-all font-orbitron ${yaraCopied === r.id ? 'bg-green-500/20 border-green-500/40 text-green-400' : 'bg-white/5 border-white/10 hover:bg-orange/10 hover:border-orange/30 hover:text-orange'}`}
+                            >
+                              <Copy size={11} /> {yaraCopied === r.id ? 'تم!' : 'نسخ'}
+                            </button>
+                            {(isManager || r.addedBy === currentUser.user) && (
+                              <button onClick={() => { setYaraEditId(r.id); setYaraForm({ name: r.name, description: r.description, rule: r.rule, tags: r.tags.join(', ') }); setYaraShowForm(true); }} className="bg-white/5 hover:bg-orange/10 hover:text-orange border border-white/10 hover:border-orange/30 px-2.5 py-1.5 rounded-xl text-xs transition-all flex items-center gap-1.5">
+                                <Settings size={11} /> تعديل
+                              </button>
+                            )}
+                            {isManager && (
+                              <button onClick={() => yaraDelete(r.id)} className="bg-white/5 hover:bg-red-500/10 hover:text-red-400 border border-white/10 hover:border-red-500/30 px-2.5 py-1.5 rounded-xl text-xs transition-all flex items-center gap-1.5">
+                                <Trash2 size={11} /> حذف
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Description */}
+                        {r.description && <p className="text-xs text-text-dim font-arabic leading-relaxed">{r.description}</p>}
+
+                        {/* Tags */}
+                        {r.tags.length > 0 && (
+                          <div className="flex flex-wrap gap-1.5">
+                            {r.tags.map(t => (
+                              <span key={t} className="text-[10px] bg-orange/10 border border-orange/20 text-orange px-2 py-0.5 rounded-lg font-mono">{t}</span>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Rule Preview */}
+                        <div
+                          className="bg-black/40 rounded-xl border border-white/10 p-3 cursor-pointer group relative overflow-hidden"
+                          onClick={() => addAuditLog('YARA: View Rule', `Viewed YARA rule: "${r.name}"`)}
+                        >
+                          <pre className="text-[11px] font-mono text-green-400/80 leading-relaxed overflow-x-auto max-h-36 overflow-y-auto" style={{ direction: 'ltr', textAlign: 'left' }}>{r.rule}</pre>
+                          <div className="absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-black/60 to-transparent pointer-events-none" />
+                        </div>
+
+                        {/* Updated info */}
+                        {r.updatedAt !== r.createdAt && (
+                          <div className="text-[10px] text-text-dim flex items-center gap-1">
+                            <History size={10} /> آخر تعديل: {new Date(r.updatedAt).toLocaleString('ar')}
+                          </div>
+                        )}
+                      </motion.div>
+                    ))}
+                  </div>
+                );
+              })()}
+            </motion.div>
+          )}
+
+
+          {/* PC-CHECK SECTION */}
+          {activeSec === 'pc_check' && isStaff && (
+            <motion.div key="pc_check" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="space-y-6 px-[4%]" dir="rtl">
+
+              {/* Header */}
+              <div className="card glow-hover border-r-[6px] border-orange space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-12 h-12 rounded-2xl bg-orange/10 flex items-center justify-center shrink-0">
+                      <Cpu className="text-orange" size={24} />
+                    </div>
+                    <div>
+                      <h1 className="font-orbitron text-2xl sm:text-3xl font-black">PC-<span className="text-orange">CHECK</span></h1>
+                      <p className="text-text-dim text-xs mt-0.5">سجلات فحص الأجهزة (HWID) • Hardware Fingerprint Checks</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <span className="bg-orange/10 border border-orange/30 text-orange font-orbitron font-black text-sm px-3 py-1.5 rounded-xl">
+                      {pcChecks.length} سجل
+                    </span>
+                    {isStaff && (
+                      <button className="btn-gold flex items-center gap-2 text-sm" onClick={() => { setPcShowForm(true); setPcEditId(null); setPcForm({ player: '', isCheater: false, pin: '', hwid: '', notes: '' }); }}>
+                        <Plus size={16} /> فحص جديد
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Search + Filter */}
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <div className="relative flex-1">
+                    <Search size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-text-dim" />
+                    <input
+                      className="input-field pr-10 text-sm"
+                      placeholder="ابحث باسم اللاعب، Pin، أو HWID..."
+                      value={pcSearchQuery}
+                      onChange={e => {
+                        setPcSearchQuery(e.target.value);
+                        if (e.target.value.trim()) addAuditLog('PC-CHECK: Search', `Searched PC-CHECK records: ${e.target.value.trim()}`);
+                      }}
+                    />
+                  </div>
+                  <select value={pcFilter} onChange={e => setPcFilter(e.target.value as any)} className="input-field sm:w-48 text-sm">
+                    <option value="all">كل السجلات</option>
+                    <option value="cheaters">مغشوشين فقط</option>
+                    <option value="clean">سليمين فقط</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Add/Edit Form */}
+              <AnimatePresence>
+                {pcShowForm && isStaff && (
+                  <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="card border border-orange/30 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <h2 className="font-orbitron font-black text-lg">{pcEditId ? 'تعديل سجل الفحص' : 'إضافة فحص جهاز جديد'}</h2>
+                      <button onClick={() => { setPcShowForm(false); setPcEditId(null); }} className="bg-white/5 hover:bg-white/10 p-2 rounded-xl transition-all"><X size={16} /></button>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs text-text-dim mb-1.5">Player *</label>
+                        <input className="input-field text-sm" placeholder="اسم اللاعب" value={pcForm.player} onChange={e => setPcForm(f => ({ ...f, player: e.target.value }))} />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-text-dim mb-1.5">Cheater</label>
+                        <div className="flex bg-black/40 p-1 rounded-xl border border-white/5">
+                          <button type="button" onClick={() => setPcForm(f => ({ ...f, isCheater: false }))} className={`flex-1 py-2 rounded-lg text-xs font-black transition-all ${!pcForm.isCheater ? 'bg-emerald-500/20 text-emerald-400' : 'text-text-dim'}`}>
+                            لا
+                          </button>
+                          <button type="button" onClick={() => setPcForm(f => ({ ...f, isCheater: true }))} className={`flex-1 py-2 rounded-lg text-xs font-black transition-all ${pcForm.isCheater ? 'bg-red/20 text-red' : 'text-text-dim'}`}>
+                            نعم
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs text-text-dim mb-1.5">Pin</label>
+                        <input className="input-field text-sm font-mono" placeholder="Pin Code" value={pcForm.pin} onChange={e => setPcForm(f => ({ ...f, pin: e.target.value }))} />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-text-dim mb-1.5">Hwid</label>
+                        <input className="input-field text-sm font-mono" placeholder="S-1-5-21-..." dir="ltr" value={pcForm.hwid} onChange={e => setPcForm(f => ({ ...f, hwid: e.target.value }))} />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs text-text-dim mb-1.5">ملاحظات إضافية (اختياري)</label>
+                      <textarea className="input-field text-sm min-h-[80px]" placeholder="أي تفاصيل إضافية عن الفحص..." value={pcForm.notes} onChange={e => setPcForm(f => ({ ...f, notes: e.target.value }))} />
+                    </div>
+                    <button className="btn-gold w-full" onClick={pcSaveCheck}>{pcEditId ? 'حفظ التعديلات' : 'حفظ السجل'}</button>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              {/* Records List */}
+              <div className="grid gap-3">
+                {filteredPcChecks.map(r => (
+                  <div key={r.id} className={`card glow-hover space-y-3 border ${r.isCheater ? 'border-red/20' : 'border-white/5'}`}>
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${r.isCheater ? 'bg-red/10 text-red' : 'bg-emerald-500/10 text-emerald-400'}`}>
+                          {r.isCheater ? <ShieldX size={18} /> : <MonitorCheck size={18} />}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="font-bold text-white truncate">{r.player}</p>
+                          <span className={`text-[10px] font-black uppercase tracking-widest ${r.isCheater ? 'text-red' : 'text-emerald-400'}`}>
+                            Cheater: {r.isCheater ? 'نعم' : 'لا'}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {(isManager || r.checkedBy === currentUser.user) && (
+                          <button onClick={() => pcStartEdit(r)} className="bg-white/5 hover:bg-orange/10 hover:text-orange border border-white/10 hover:border-orange/30 px-2.5 py-1.5 rounded-xl text-xs transition-all flex items-center gap-1.5">
+                            <Settings size={11} /> تعديل
+                          </button>
+                        )}
+                        {isManager && (
+                          <button onClick={() => pcDeleteCheck(r.id)} className="bg-white/5 hover:bg-red-500/10 hover:text-red-400 border border-white/10 hover:border-red-500/30 px-2.5 py-1.5 rounded-xl text-xs transition-all flex items-center gap-1.5">
+                            <Trash2 size={11} /> حذف
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs font-mono bg-black/30 rounded-xl p-3 border border-white/5" dir="ltr">
+                      <div className="flex justify-between sm:flex-col sm:gap-0.5">
+                        <span className="text-text-dim">Pin:</span>
+                        <span className="text-white break-all">{r.pin || '—'}</span>
+                      </div>
+                      <div className="flex justify-between sm:flex-col sm:gap-0.5">
+                        <span className="text-text-dim">Hwid:</span>
+                        <span className="text-orange break-all">{r.hwid || '—'}</span>
+                      </div>
+                    </div>
+                    {r.notes && <p className="text-xs text-text-dim leading-relaxed">{r.notes}</p>}
+                    <div className="flex items-center justify-between text-[10px] text-text-dim pt-2 border-t border-white/5">
+                      <span>فحص بواسطة: <span className="text-white font-bold">{r.checkedBy}</span></span>
+                      <span className="font-mono">{new Date(r.updatedAt).toLocaleString('ar-SA')}</span>
+                    </div>
+                  </div>
+                ))}
+                {filteredPcChecks.length === 0 && (
+                  <div className="card text-center py-16 text-text-dim">
+                    <Cpu size={32} className="mx-auto mb-3 opacity-30" />
+                    <p className="text-sm">{pcChecks.length === 0 ? 'لا توجد سجلات فحص حالياً — ابدأ بإضافة أول سجل' : 'لا توجد نتائج مطابقة لمعايير البحث'}</p>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          )}
+
+
           {/* TICKETS SECTION */}
           {(activeSec === 'tickets') && (
             <motion.div key="tickets" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="space-y-8 h-full">
@@ -4034,24 +5610,24 @@ ${renderIdentifiers(ban.identifiers)}
                  <div className="flex flex-wrap justify-center gap-8 pb-4">
                    <TeamCard img="https://i.postimg.cc/67PvHZ08/ce8f0b8d33b78b374f1bb5befb384664.webp" name="Hazem" role="Manager" />
                    <TeamCard img="https://i.postimg.cc/bGrnHgQn/a600e837cb02c2686385ec98c653b650.webp" name="Abdulmalik" role="Manager" highlight />
-                   <TeamCard img="https://i.postimg.cc/RZb4GNc7/a08a8e01bef71ad9a7a6d997ff316aac.webp" name="ERIC" role="Manager" />
+                   <TeamCard img="https://i.postimg.cc/McHBb5yj/1a193e863f6c77744178d5e35aa5b2f4.webp" name="ERIC" role="Manager" />
                  </div>
                </div>
 
                <div className="flex flex-col items-center">
                  <div className="section-title text-xl text-orange font-bold border-r-4 border-orange pr-4 mb-4 font-orbitron self-start">Leader</div>
-                 <TeamCard img="https://i.postimg.cc/P59v0k7m/wwwww.jpg" name="Meshal" role="Leader" />
+                 <TeamCard img="https://i.postimg.cc/d7fyWCB1/08dc51c773720277f5ff1070bab6d13e.webp" name="Meshal" role="Team Leader" />
                </div>
 
                <div>
                  <div className="section-title text-xl text-orange font-bold border-r-4 border-orange pr-4 mb-8 font-orbitron">Members</div>
                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-7 gap-4">
                    {[
-                     { img: "https://i.postimg.cc/1zkPh27V/5ef8b1f0a07e532d9a5e6d46ac6958b8.webp", name: "Qm7md" },
-                     { img: "https://i.postimg.cc/d3BKC1sL/03cf8139d358de47d3fbf8fe5bf7c3ef.webp", name: "Saad" },
-                     { img: "https://i.postimg.cc/FRSrYNkR/293df0d2a90c6f742af136800d4847f5.webp", name: "Mjeed" },
-                     { img: "https://i.postimg.cc/2S8xCmTP/c5a488644728e1e6e4461093a36a3358.webp", name: "Mod" },
-                     { img: "https://i.postimg.cc/qq0TgndG/a2577322206bb6411d1fcbb4c31a70ae.webp", name: "Rakan" },
+                     { img: "https://i.postimg.cc/B8zKhFgL/e8aae06603194b6be3576ea76bff3281.webp", name: "Qm7md" },
+                     { img: "https://i.postimg.cc/8FY6yvHF/4f061a337c25e1054e07f6e4e35e76b6.webp", name: "Saad" },
+                     { img: "https://i.postimg.cc/KKWM9TNR/9ce4c94a556a96c2bfe1333cb8ee0dc5.webp", name: "Mjeed" },
+                     { img: "https://i.postimg.cc/GBfyMDQ9/770dd8597a42a19217a035305a352aee.webp", name: "Mod" },
+                     { img: "https://i.postimg.cc/JyFkTXqh/a983d12b6e78113d823387c14c442b61.webp", name: "Rakan" },
                      { img: "https://i.postimg.cc/LqW1yPT8/60b49929b666ef976263261f2d59357d.webp", name: "WL2" },
                      { img: "https://i.postimg.cc/v1KVPnzH/1756a6bd283fd95ccd48509c92e75af6.webp", name: "RT" },
                    ].map((m, i) => (
@@ -4081,6 +5657,131 @@ ${renderIdentifiers(ban.identifiers)}
           )}
         </AnimatePresence>
       </main>
+
+      {/* Image / Video Preview Modal */}
+      <AnimatePresence>
+        {selectedPreview && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[250] bg-black/95 backdrop-blur-md flex items-center justify-center p-4"
+            onClick={() => setSelectedPreview(null)}
+          >
+            <motion.div
+              initial={{ scale: 0.92, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.92, opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              className="relative max-w-4xl max-h-[90vh] w-full flex flex-col items-center gap-3"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between w-full px-1">
+                <p className="text-sm font-bold text-white truncate">{selectedPreview.name || 'معاينة الملف'}</p>
+                <button onClick={() => setSelectedPreview(null)} className="bg-white/10 hover:bg-white/20 p-2 rounded-full transition-colors">
+                  <X size={16} />
+                </button>
+              </div>
+              {selectedPreview.type === 'image' ? (
+                <img
+                  src={selectedPreview.url}
+                  alt={selectedPreview.name}
+                  className="max-h-[80vh] max-w-full rounded-2xl object-contain shadow-[0_0_40px_rgba(0,0,0,0.8)]"
+                />
+              ) : (
+                <video
+                  src={selectedPreview.url}
+                  controls
+                  autoPlay
+                  className="max-h-[80vh] max-w-full rounded-2xl shadow-[0_0_40px_rgba(0,0,0,0.8)]"
+                />
+              )}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Command Palette — بحث شامل (Ctrl+K) */}
+      <AnimatePresence>
+        {commandPaletteOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[200] bg-black/80 backdrop-blur-md flex items-start justify-center pt-[12vh] px-4"
+            onClick={() => setCommandPaletteOpen(false)}
+          >
+            <motion.div
+              initial={{ opacity: 0, y: -20, scale: 0.97 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -20, scale: 0.97 }}
+              transition={{ duration: 0.18 }}
+              className="w-full max-w-2xl bg-[#0a0a0a] border border-orange/30 rounded-3xl shadow-[0_0_60px_rgba(255,106,0,0.15)] overflow-hidden"
+              onClick={e => e.stopPropagation()}
+              dir="rtl"
+            >
+              <div className="flex items-center gap-3 px-5 py-4 border-b border-white/5">
+                <Search size={18} className="text-orange flex-shrink-0" />
+                <input
+                  autoFocus
+                  value={commandQuery}
+                  onChange={e => { setCommandQuery(e.target.value); setCommandSelectedIndex(0); }}
+                  onKeyDown={e => {
+                    if (e.key === 'ArrowDown') { e.preventDefault(); setCommandSelectedIndex(i => Math.min(i + 1, commandResults.length - 1)); }
+                    else if (e.key === 'ArrowUp') { e.preventDefault(); setCommandSelectedIndex(i => Math.max(i - 1, 0)); }
+                    else if (e.key === 'Enter' && commandResults[commandSelectedIndex]) { navigateToSearchResult(commandResults[commandSelectedIndex]); }
+                  }}
+                  placeholder="بحث عن لاعب، ملف باند، دليل، أو حساب مرتبط... (Discord ID, اسم, سبب)"
+                  className="flex-1 bg-transparent outline-none text-white placeholder:text-gray-600 text-sm font-arabic"
+                />
+                <span className="text-[9px] font-mono text-text-dim border border-white/10 rounded px-1.5 py-0.5">ESC</span>
+              </div>
+
+              <div className="max-h-[50vh] overflow-y-auto">
+                {!commandQuery.trim() ? (
+                  <div className="px-5 py-10 text-center text-text-dim text-xs font-arabic space-y-2">
+                    <p>ابحث بأي طريقة — Discord ID، اسم لاعب، سبب باند، أو وصف دليل</p>
+                    <p className="opacity-60">النتائج تشمل: القضايا، البلاوات، الأدلة، Intelligence Room، واللاعبين</p>
+                  </div>
+                ) : commandResults.length === 0 ? (
+                  <div className="px-5 py-10 text-center text-text-dim text-xs font-arabic">لا توجد نتائج مطابقة لـ "{commandQuery}"</div>
+                ) : (
+                  <div className="py-2">
+                    {commandResults.map((r, i) => {
+                      const kindMeta: Record<string, { icon: any; color: string; label: string }> = {
+                        case: { icon: Crosshair, color: 'text-orange', label: 'ملف' },
+                        ban: { icon: Gavel, color: 'text-red', label: 'باند' },
+                        evidence: { icon: Layers, color: 'text-blue-400', label: 'دليل' },
+                        altProfile: { icon: Network, color: 'text-purple-400', label: 'Intelligence Room' },
+                        player: { icon: UserIcon, color: 'text-emerald-400', label: 'لاعب' },
+                      };
+                      const meta = kindMeta[r.kind] || { icon: Search, color: 'text-text-dim', label: '' };
+                      const Icon = meta.icon;
+                      return (
+                        <div
+                          key={`${r.kind}-${r.id}`}
+                          onClick={() => navigateToSearchResult(r)}
+                          onMouseEnter={() => setCommandSelectedIndex(i)}
+                          className={`flex items-center gap-3 px-5 py-3 cursor-pointer transition-colors ${i === commandSelectedIndex ? 'bg-orange/10 border-r-2 border-orange' : 'hover:bg-white/[0.03]'}`}
+                        >
+                          <div className={`w-8 h-8 rounded-lg bg-white/5 flex items-center justify-center flex-shrink-0 ${meta.color}`}>
+                            <Icon size={15} />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm text-white font-bold truncate">{r.title}</p>
+                            <p className="text-[11px] text-text-dim truncate">{r.subtitle}</p>
+                          </div>
+                          {i === commandSelectedIndex && <CornerDownLeft size={13} className="text-orange flex-shrink-0" />}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Confirmation Modal */}
       <AnimatePresence>
@@ -4168,7 +5869,7 @@ ${renderIdentifiers(ban.identifiers)}
                 
                 <div className="absolute top-6 left-6 flex items-center gap-3 bg-black/60 backdrop-blur-md px-4 py-2 rounded-xl border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity">
                   <div className="w-2 h-2 bg-orange rounded-full animate-ping"></div>
-                  <span className="text-[10px] text-white font-black uppercase tracking-widest font-orbitron">MT X LOGS High-Def Evidence</span>
+                  <span className="text-[10px] text-white font-black uppercase tracking-widest font-orbitron">MT Logs High-Def Evidence</span>
                 </div>
               </div>
             </motion.div>
