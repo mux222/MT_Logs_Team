@@ -460,18 +460,49 @@ import {
   FileCode,
   Radio,
   Cpu,
-  MonitorCheck
+  MonitorCheck,
+  Check,
+  Pencil,
+  Server,
+  Upload
 } from 'lucide-react';
 import { User, UserRole, Ticket, Ban, Message, BanEvidence, AuditLog, PersonalNote, InvestigationCase, EvidenceItem, CaseEvent, CaseStatus, RiskLevel, EvidenceCategory, AltProfile, YaraRule, PCCheckRecord } from './types';
 import {
-  getAll, putItem, deleteItem, supabase, dbDiagnostics,
+  getAll, putItem, deleteItem, supabase, dbDiagnostics, getSupabaseWithUser,
   hashPasswordWithSalt, verifyPasswordWithSalt, legacyVerify,
   generateSalt, verifyUserRoleFromDB, validateFile, sendDiscordViaEdge,
   calculateRiskAssessment, globalSearch, assertCryptoAvailable, type RiskAssessment, type SearchResult
 } from './db';
 
+// ── Pre-WL Hack type ─────────────────────────────────────
+interface PreWLHack {
+  id: number;
+  rawText: string;
+  playerName: string;
+  license: string;
+  license2: string;
+  licenses: string[];   // كل الـ licenses (license + license2 + أي إضافي)
+  steam: string;
+  steams: string[];     // كل الـ steams
+  discord: string;
+  discords: string[];   // كل الـ discords (حتى 10)
+  xbl: string;
+  liveId: string;
+  ip: string;
+  bannedFrom: string;
+  hackActive: 'yes' | 'no';
+  imageBase64?: string;
+  createdBy: string;
+  createdByRole: string;
+  createdAt: number;
+  updatedBy?: string;
+  updatedByRole?: string;
+  updatedAt?: number;
+  timeline: { action: string; by: string; byRole: string; at: number; old?: string; new?: string }[];
+}
+
 export default function App() {
-  const [activeSec, setActiveSec] = useState<'home' | 'team' | 'goals' | 'tickets' | 'bans' | 'manage' | 'profile' | 'audit_logs' | 'closed_tickets' | 'my_dashboard' | 'notepad' | 'manager_notes' | 'leaderboard' | 'investigation_hub' | 'case_tracker' | 'intelligence_room' | 'yara_rules' | 'pc_check'>('home');
+  const [activeSec, setActiveSec] = useState<'home' | 'team' | 'goals' | 'tickets' | 'bans' | 'manage' | 'profile' | 'audit_logs' | 'closed_tickets' | 'my_dashboard' | 'notepad' | 'manager_notes' | 'leaderboard' | 'investigation_hub' | 'case_tracker' | 'intelligence_room' | 'yara_rules' | 'pc_check' | 'pre_wl_hacks'>('home');
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [toast, setToast] = useState<{ show: boolean; msg: string } | null>(null);
   const [showDbDiagnostics, setShowDbDiagnostics] = useState(false);
@@ -495,6 +526,15 @@ export default function App() {
   const [cases, setCases] = useState<InvestigationCase[]>([]);
   const [evidenceItems, setEvidenceItems] = useState<EvidenceItem[]>([]);
   const [altProfiles, setAltProfiles] = useState<AltProfile[]>([]);
+  const [preWLHacks, setPreWLHacks] = useState<PreWLHack[]>([]);
+  const [preWLSearch, setPreWLSearch] = useState('');
+  const [preWLFilter, setPreWLFilter] = useState<'all' | 'active' | 'inactive'>('all');
+  const [preWLShowForm, setPreWLShowForm] = useState(false);
+  const [preWLView, setPreWLView] = useState<'list' | 'detail'>('list');
+  const [preWLSelected, setPreWLSelected] = useState<PreWLHack | null>(null);
+  const [preWLForm, setPreWLForm] = useState({ rawText: '', bannedFrom: '', hackActive: 'yes' as 'yes' | 'no', imageBase64: '' });
+  const [preWLEditId, setPreWLEditId] = useState<number | null>(null);
+  const [preWLCopied, setPreWLCopied] = useState<string | null>(null);
   const [yaraRules, setYaraRules] = useState<YaraRule[]>([]);
   const [loading, setLoading] = useState(true);
   const [auditLogSearchQuery, setAuditLogSearchQuery] = useState('');
@@ -631,6 +671,32 @@ export default function App() {
         setCases(await getAll<InvestigationCase>('cases'));
         setEvidenceItems(await getAll<EvidenceItem>('evidence_items'));
         setAltProfiles(await getAll<AltProfile>('alt_profiles'));
+        const rawPreWL = await getAll<any>('pre_wl_hacks');
+        setPreWLHacks(rawPreWL.map((raw: any) => ({
+          id: raw.id,
+          rawText: raw.raw_text || raw.rawText || '',
+          playerName: raw.player_name || raw.playerName || '',
+          license: raw.license || '',
+          license2: raw.license2 || '',
+          licenses: raw.licenses ? (typeof raw.licenses === 'string' ? JSON.parse(raw.licenses) : raw.licenses) : [raw.license, raw.license2].filter(Boolean),
+          steam: raw.steam || '',
+          steams: raw.steams ? (typeof raw.steams === 'string' ? JSON.parse(raw.steams) : raw.steams) : [raw.steam].filter(Boolean),
+          discord: raw.discord || '',
+          discords: raw.discords ? (typeof raw.discords === 'string' ? JSON.parse(raw.discords) : raw.discords) : [raw.discord].filter(Boolean),
+          xbl: raw.xbl || '',
+          liveId: raw.live_id || raw.liveId || '',
+          ip: raw.ip || '',
+          bannedFrom: raw.banned_from || raw.bannedFrom || '',
+          hackActive: raw.hack_active !== undefined ? (raw.hack_active ? 'yes' : 'no') : (raw.hackActive || 'no'),
+          imageBase64: raw.image_base64 || raw.imageBase64 || '',
+          createdBy: raw.created_by || raw.createdBy || '',
+          createdByRole: raw.created_by_role || raw.createdByRole || '',
+          createdAt: raw.created_at ? new Date(raw.created_at).getTime() : (raw.createdAt || Date.now()),
+          updatedBy: raw.updated_by || raw.updatedBy,
+          updatedByRole: raw.updated_by_role || raw.updatedByRole,
+          updatedAt: raw.updated_at ? new Date(raw.updated_at).getTime() : raw.updatedAt,
+          timeline: raw.timeline ? (typeof raw.timeline === 'string' ? JSON.parse(raw.timeline) : raw.timeline) : [],
+        } as PreWLHack)));
         setYaraRules(await getAll<YaraRule>('yara_rules'));
         setPcChecks(await getAll<PCCheckRecord>('pc_checks'));
       } catch (e) {
@@ -786,6 +852,37 @@ export default function App() {
     });
 
     // Subscribe to alt profiles
+    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'pre_wl_hacks' }, (payload) => {
+      if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+        const raw = payload.new as any;
+        const h: PreWLHack = {
+          id: raw.id,
+          rawText: raw.raw_text || '',
+          playerName: raw.player_name || '',
+          license: raw.license || '',
+          license2: raw.license2 || '',
+          licenses: raw.licenses ? (typeof raw.licenses === 'string' ? JSON.parse(raw.licenses) : raw.licenses) : [raw.license, raw.license2].filter(Boolean),
+          steam: raw.steam || '',
+          steams: raw.steams ? (typeof raw.steams === 'string' ? JSON.parse(raw.steams) : raw.steams) : [raw.steam].filter(Boolean),
+          discord: raw.discord || '',
+          discords: raw.discords ? (typeof raw.discords === 'string' ? JSON.parse(raw.discords) : raw.discords) : [raw.discord].filter(Boolean),
+          xbl: raw.xbl || '',
+          liveId: raw.live_id || '',
+          ip: raw.ip || '',
+          bannedFrom: raw.banned_from || '',
+          hackActive: raw.hack_active ? 'yes' : 'no',
+          imageBase64: raw.image_base64 || '',
+          createdBy: raw.created_by || '',
+          createdByRole: raw.created_by_role || '',
+          createdAt: raw.created_at ? new Date(raw.created_at).getTime() : Date.now(),
+          updatedBy: raw.updated_by,
+          updatedByRole: raw.updated_by_role,
+          updatedAt: raw.updated_at ? new Date(raw.updated_at).getTime() : undefined,
+          timeline: raw.timeline ? (typeof raw.timeline === 'string' ? JSON.parse(raw.timeline) : raw.timeline) : [],
+        };
+        setPreWLHacks(prev => { const i = prev.findIndex(x => String(x.id) === String(h.id)); return i >= 0 ? prev.map(x => String(x.id) === String(h.id) ? h : x) : [h, ...prev]; });
+      } else { setPreWLHacks(prev => prev.filter(x => String(x.id) !== String((payload.old as any).id))); }
+    });
     channel.on('postgres_changes', { event: '*', schema: 'public', table: 'alt_profiles' }, (payload) => {
       if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
         const p = payload.new as AltProfile;
@@ -877,8 +974,8 @@ export default function App() {
 
   const commandResults: SearchResult[] = useMemo(() => {
     if (!commandQuery.trim()) return [];
-    return globalSearch(commandQuery, cases, bans, evidenceItems, altProfiles);
-  }, [commandQuery, cases, bans, evidenceItems, altProfiles]);
+    return globalSearch(commandQuery, cases, bans, evidenceItems, altProfiles, preWLHacks, pcChecks);
+  }, [commandQuery, cases, bans, evidenceItems, altProfiles, preWLHacks, pcChecks]);
 
   const navigateToSearchResult = (result: SearchResult) => {
     if (result.kind === 'case') {
@@ -896,6 +993,18 @@ export default function App() {
     } else if (result.kind === 'player') {
       setActiveSec('investigation_hub');
       setCaseSearchQuery(result.discordId || '');
+    } else if (result.kind === 'preWlHack') {
+      setActiveSec('pre_wl_hacks');
+      setPreWLSearch('');
+      setPreWLFilter('all');
+      const hack = preWLHacks.find(h => h.id === result.id);
+      if (hack) {
+        setPreWLSelected(hack);
+        setPreWLView('detail');
+      }
+    } else if (result.kind === 'pcCheck') {
+      setActiveSec('pc_check');
+      setPcSearchQuery(result.title);
     }
     setCommandPaletteOpen(false);
     setCommandQuery('');
@@ -2140,6 +2249,326 @@ ${renderIdentifiers(ban.identifiers)}
   };
 
   // ═══════════════════════════════════════════════════════
+  //  PRE-WL HACKS — Handlers
+  // ═══════════════════════════════════════════════════════
+
+  const parsePreWLRaw = (raw: string) => {
+    const lines = raw.split('\n').map((l: string) => l.trim()).filter(Boolean);
+    let playerName = '';
+    const licenses: string[]  = [];
+    const steams: string[]    = [];
+    const discords: string[]  = [];
+    let xbl = '', liveId = '', ip = '';
+
+    // ─── مفاتيح الاسم ───
+    const NAME_KEYS = [
+      'اسم اللاعب', 'اسم_اللاعب', 'اسم',
+      'name', 'player', 'playername', 'player name', 'player_name',
+    ];
+
+    // ─── مفاتيح المعرفات ───
+    const ID_KEYS = ['license', 'license2', 'steam', 'discord', 'xbl', 'liveid', 'live', 'ip', 'hwid'];
+
+    // ─── استخراج القيمة (LTR) ───
+    const extractLTR = (line: string, key: string): string => {
+      // داخل أقواس: key:(key:value)
+      const inParens = line.match(new RegExp(`${key}\\s*:[^(]*\\(${key}:([^)]+)\\)`, 'i'));
+      if (inParens) return inParens[1].trim();
+      // مباشر: key:value
+      const direct = line.match(new RegExp(`${key}\\s*:\\s*([^(\\s][^\\s]*)`, 'i'));
+      if (direct) return direct[1].trim();
+      return '';
+    };
+
+    // ─── استخراج القيمة (RTL — القيمة يسار، المفتاح يمين) ───
+    const extractRTL = (line: string, key: string): string => {
+      const m = line.match(new RegExp(`^(.+?)\\s*:\\s*${key}\\s*$`, 'i'));
+      if (m) return m[1].trim();
+      return '';
+    };
+
+    const extractAny = (line: string, key: string): string =>
+      extractLTR(line, key) || extractRTL(line, key);
+
+    // ─── هل السطر يبدأ أو ينتهي بمفتاح معروف؟ ───
+    const hasKey = (line: string, keys: string[]): boolean => {
+      const l = line.toLowerCase();
+      return keys.some(k => {
+        const kl = k.toLowerCase();
+        return l.startsWith(kl + ':') || l.startsWith(kl + ' :') ||
+               l.endsWith(':' + kl) || l.endsWith(': ' + kl) || l.endsWith(' :' + kl);
+      });
+    };
+
+    // ─── استخراج اسم اللاعب من سطره الصريح ───
+    const extractName = (line: string): string => {
+      for (const k of NAME_KEYS) {
+        const ltr = line.match(new RegExp(`^${k}\\s*:\\s*(.+)$`, 'i'));
+        if (ltr) return ltr[1].trim();
+        const rtl = line.match(new RegExp(`^(.+?)\\s*:\\s*${k}\\s*$`, 'i'));
+        if (rtl) return rtl[1].trim();
+      }
+      return '';
+    };
+
+    const isIdLine   = (line: string) => hasKey(line, ID_KEYS);
+    const isNameLine = (line: string) => hasKey(line, NAME_KEYS);
+
+    const looksLikeName = (line: string): boolean => {
+      if (!line || line.length < 2) return false;
+      if (/^https?:\/\//i.test(line)) return false;
+      if (/^\d{1,3}(\.\d{1,3}){3}$/.test(line)) return false;
+      if (/^\d{10,}$/.test(line)) return false;
+      if (isIdLine(line) || isNameLine(line)) return false;
+      if (!line.includes(':')) return true;
+      return line.split(':')[0].trim().length > 15;
+    };
+
+    for (const line of lines) {
+      const lower = line.toLowerCase();
+
+      // ── اسم اللاعب (صريح) ──
+      if (!playerName && isNameLine(line)) {
+        playerName = extractName(line);
+      }
+      // ── License / License2 / licenseN — كلها تُجمع ──
+      else if (
+        (lower.match(/^license\d*\s*:/) || lower.match(/^license\d*\s*\(/) || lower.match(/:license\d*\s*$/)) &&
+        !lower.startsWith('steam')
+      ) {
+        // استخرج بـ license أولاً ثم license2 إذا فشل
+        const val = extractLTR(line, 'license2') || extractLTR(line, 'license') ||
+                    extractRTL(line, 'license2') || extractRTL(line, 'license');
+        if (val && !licenses.includes(val)) licenses.push(val);
+      }
+      // ── Steam — يجمع كل الـ steams ──
+      else if (lower.includes('steam:') || lower.includes(':steam')) {
+        const val = extractAny(line, 'steam');
+        if (val && !steams.includes(val)) steams.push(val);
+      }
+      // ── Discord — يجمع حتى 10 ──
+      else if ((lower.includes('discord:') || lower.includes(':discord')) && discords.length < 10) {
+        const val = extractAny(line, 'discord');
+        if (val && !discords.includes(val)) discords.push(val);
+      }
+      // ── XBL ──
+      else if (!xbl && (lower.includes('xbl:') || lower.includes(':xbl'))) {
+        xbl = extractAny(line, 'xbl');
+      }
+      // ── LiveID ──
+      else if (!liveId && (lower.includes('liveid:') || lower.includes(':liveid') || lower.startsWith('live:') || lower.endsWith(':live'))) {
+        liveId = extractAny(line, 'liveid') || extractAny(line, 'live');
+      }
+      // ── IP ──
+      else if (!ip && (lower.startsWith('ip:') || lower.endsWith(':ip'))) {
+        ip = extractAny(line, 'ip');
+      }
+      // ── اسم ضمني ──
+      else if (!playerName && looksLikeName(line)) {
+        playerName = line;
+      }
+    }
+
+    // Fallback للاسم
+    if (!playerName) {
+      for (const line of lines) {
+        if (!isIdLine(line) && !isNameLine(line) && line.length > 1) {
+          playerName = line; break;
+        }
+      }
+    }
+
+    return {
+      playerName,
+      license:  licenses[0]  || '',
+      license2: licenses[1]  || '',
+      licenses,
+      steam:    steams[0]    || '',
+      steams,
+      discord:  discords[0]  || '',
+      discords,
+      xbl,
+      liveId,
+      ip,
+    };
+  };
+
+  const preWLSave = async () => {
+  if (!currentUser) return;
+  if (!preWLForm.rawText.trim() || !preWLForm.bannedFrom.trim()) return;
+
+  const parsed = parsePreWLRaw(preWLForm.rawText);
+  const isEdit = preWLEditId !== null;
+  const existing = isEdit ? preWLHacks.find(h => h.id === preWLEditId) : null;
+  const now = Date.now();
+
+  const entry = {
+    action: isEdit ? 'تعديل السجل' : 'إنشاء السجل',
+    by: currentUser.user,
+    byRole: currentUser.role,
+    at: now,
+    old: isEdit ? existing?.rawText : undefined,
+    new: preWLForm.rawText,
+  };
+
+  // ─── payload لـ Supabase (snake_case، بدون id عند الإضافة) ──────────
+  const supabasePayload: Record<string, any> = {
+    raw_text: preWLForm.rawText,
+    player_name: parsed.playerName,
+    license: parsed.license,
+    license2: parsed.license2,
+    licenses: JSON.stringify(parsed.licenses),
+    steam: parsed.steam,
+    steams: JSON.stringify(parsed.steams),
+    discord: parsed.discord,
+    discords: JSON.stringify(parsed.discords),
+    xbl: parsed.xbl,
+    live_id: parsed.liveId,
+    ip: parsed.ip,
+    banned_from: preWLForm.bannedFrom,
+    hack_active: preWLForm.hackActive === 'yes',
+    image_base64: preWLForm.imageBase64 || (isEdit ? existing?.imageBase64 : ''),
+    created_by: isEdit ? (existing?.createdBy || currentUser.user) : currentUser.user,
+    created_by_role: isEdit ? (existing?.createdByRole || currentUser.role) : currentUser.role,
+    updated_by: currentUser.user,
+    updated_by_role: currentUser.role,
+    updated_at: new Date(now).toISOString(),
+    timeline: JSON.stringify([...(existing?.timeline || []), entry]),
+  };
+
+  // عند الإضافة — Supabase يولّد id و created_at تلقائياً
+  // عند التعديل — نرسل id فقط
+  if (isEdit) {
+    supabasePayload.id = preWLEditId;
+  }
+
+  // ─── حفظ في Supabase ────────────────────────────────────────────────
+  const client = getSupabaseWithUser();
+  let savedId = isEdit ? preWLEditId! : now;
+
+  if (client) {
+    try {
+      if (isEdit) {
+        const { error } = await client
+          .from('pre_wl_hacks')
+          .update(supabasePayload)
+          .eq('id', preWLEditId);
+        if (error) throw new Error(error.message);
+      } else {
+        const { data, error } = await client
+          .from('pre_wl_hacks')
+          .insert(supabasePayload)
+          .select('id, created_at')
+          .single();
+        if (error) throw new Error(error.message);
+        savedId = data.id;
+      }
+    } catch (e: any) {
+      console.error('Supabase preWLSave error:', e.message);
+      // fallback لـ IndexedDB
+      await putItem('pre_wl_hacks', { ...supabasePayload, id: now });
+    }
+  } else {
+    await putItem('pre_wl_hacks', { ...supabasePayload, id: now });
+  }
+
+  // ─── تحديث الـ state المحلي ──────────────────────────────────────────
+  const localHack: PreWLHack = {
+    id: savedId,
+    rawText: preWLForm.rawText,
+    playerName: parsed.playerName,
+    license: parsed.license,
+    license2: parsed.license2,
+    licenses: parsed.licenses,
+    steam: parsed.steam,
+    steams: parsed.steams,
+    discord: parsed.discord,
+    discords: parsed.discords,
+    xbl: parsed.xbl,
+    liveId: parsed.liveId,
+    ip: parsed.ip,
+    bannedFrom: preWLForm.bannedFrom,
+    hackActive: preWLForm.hackActive,
+    imageBase64: preWLForm.imageBase64 || (isEdit ? existing?.imageBase64 : ''),
+    createdBy: isEdit ? (existing?.createdBy || currentUser.user) : currentUser.user,
+    createdByRole: isEdit ? (existing?.createdByRole || currentUser.role) : currentUser.role,
+    createdAt: isEdit ? (existing?.createdAt || now) : now,
+    updatedBy: currentUser.user,
+    updatedByRole: currentUser.role,
+    updatedAt: now,
+    timeline: [...(existing?.timeline || []), entry],
+  };
+
+  setPreWLHacks(prev =>
+    isEdit ? prev.map(h => h.id === localHack.id ? localHack : h) : [localHack, ...prev]
+  );
+
+  await addAuditLog(
+    isEdit ? 'Pre-WL: تعديل سجل' : 'Pre-WL: إضافة سجل',
+    `اللاعب: ${parsed.playerName || 'غير معروف'} | سيرفر: ${preWLForm.bannedFrom} | الهاك: ${preWLForm.hackActive === 'yes' ? 'متفعل' : 'غير متفعل'}`
+  );
+
+  setPreWLForm({ rawText: '', bannedFrom: '', hackActive: 'yes', imageBase64: '' });
+  setPreWLEditId(null);
+  setPreWLShowForm(false);
+  setToast({ show: true, msg: isEdit ? '✅ تم تحديث السجل' : '✅ تم حفظ السجل' });
+  setTimeout(() => setToast(null), 3000);
+};
+
+  const preWLDelete = async (id: number) => {
+    if (!isManager) {
+      setToast({ show: true, msg: '🔒 صلاحية الإدارة فقط — لا يمكن لرتبة Logs Team الحذف' });
+      setTimeout(() => setToast(null), 3000);
+      return;
+    }
+    triggerConfirm('حذف السجل', 'هل أنت متأكد من حذف هذا السجل نهائياً؟', async () => {
+      const hack = preWLHacks.find(h => h.id === id);
+      await deleteItem('pre_wl_hacks', id);
+      setPreWLHacks(prev => prev.filter(h => h.id !== id));
+      if (preWLSelected?.id === id) { setPreWLSelected(null); setPreWLView('list'); }
+      await addAuditLog('Pre-WL: حذف سجل', `اللاعب: ${hack?.playerName || 'غير معروف'} | سيرفر: ${hack?.bannedFrom}`);
+      setToast({ show: true, msg: '🗑️ تم حذف السجل' });
+      setTimeout(() => setToast(null), 2500);
+    });
+  };
+
+  const preWLStartEdit = (hack: PreWLHack) => {
+    setPreWLForm({ rawText: hack.rawText, bannedFrom: hack.bannedFrom, hackActive: hack.hackActive, imageBase64: hack.imageBase64 || '' });
+    setPreWLEditId(hack.id);
+    setPreWLShowForm(true);
+  };
+
+  const preWLCopyAll = async (hack: PreWLHack) => {
+    await navigator.clipboard.writeText(hack.rawText);
+    setPreWLCopied('all-' + hack.id);
+    setTimeout(() => setPreWLCopied(null), 2000);
+    await addAuditLog('Pre-WL: نسخ بيانات', `اللاعب: ${hack.playerName || 'غير معروف'}`);
+  };
+
+  const preWLCopyField = async (hackId: number, field: string, value: string) => {
+    await navigator.clipboard.writeText(value);
+    setPreWLCopied(field + '-' + hackId);
+    setTimeout(() => setPreWLCopied(null), 2000);
+  };
+
+  const preWLImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setPreWLForm(f => ({ ...f, imageBase64: reader.result as string }));
+    reader.readAsDataURL(file);
+  };
+
+  const preWLFiltered = useMemo(() => {
+    const q = preWLSearch.toLowerCase().trim();
+    return preWLHacks
+      .filter(h => preWLFilter === 'all' || (preWLFilter === 'active' ? h.hackActive === 'yes' : h.hackActive === 'no'))
+      .filter(h => !q || [h.playerName, ...(h.licenses||[h.license,h.license2]), ...(h.steams||[h.steam]), ...(h.discords||[h.discord]), h.xbl, h.liveId, h.ip, h.bannedFrom].some(v => v?.toLowerCase().includes(q)))
+      .sort((a, b) => b.createdAt - a.createdAt);
+  }, [preWLHacks, preWLSearch, preWLFilter]);
+
+
+  // ═══════════════════════════════════════════════════════
   //  INVESTIGATION HUB / CASE TRACKER — Handlers
   // ═══════════════════════════════════════════════════════
 
@@ -2822,6 +3251,11 @@ ${renderIdentifiers(ban.identifiers)}
           {isStaff && (
             <span className={`nav-link ${activeSec === 'pc_check' ? 'active' : ''} !text-orange/90 flex items-center gap-1.5`} onClick={() => setActiveSec('pc_check')}>
               <Cpu size={14} /> PC-CHECK
+            </span>
+          )}
+          {isStaff && (
+            <span className={`nav-link ${activeSec === 'pre_wl_hacks' ? 'active' : ''} !text-red-400 flex items-center gap-1.5`} onClick={() => { setActiveSec('pre_wl_hacks'); setPreWLView('list'); }}>
+              <ShieldAlert size={14} /> الهاكات قبل الوايت لست
             </span>
           )}
           {isManager && (
@@ -4309,35 +4743,13 @@ ${renderIdentifiers(ban.identifiers)}
                             <div className="grid sm:grid-cols-2 gap-3">
                               {linkedEvidence.map(ev => (
                                 <div key={ev.id} className="p-3 rounded-xl bg-white/[0.02] border border-white/5 flex items-center gap-3">
-                                  {/* Thumbnail / preview trigger */}
-                                  <div
-                                    className={`w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 text-orange overflow-hidden ${ev.url && (ev.type === 'image' || ev.type === 'video') ? 'cursor-pointer hover:opacity-80 transition-opacity bg-black' : 'bg-orange/10'}`}
-                                    onClick={() => {
-                                      if (ev.url && (ev.type === 'image' || ev.type === 'video')) {
-                                        setFullScreenMedia({ url: ev.url, type: ev.type as 'image' | 'video' });
-                                      }
-                                    }}
-                                  >
-                                    {ev.url && ev.type === 'image' ? (
-                                      <img src={ev.url} alt={ev.name} className="w-full h-full object-cover rounded-lg" />
-                                    ) : ev.url && ev.type === 'video' ? (
-                                      <div className="relative w-full h-full flex items-center justify-center bg-black/60 rounded-lg">
-                                        <Video size={14} className="text-orange" />
-                                      </div>
-                                    ) : ev.type === 'video' ? <Video size={14} /> : ev.type === 'image' ? <ImageIcon size={14} /> : <FileText size={14} />}
+                                  <div className="w-9 h-9 rounded-lg bg-orange/10 flex items-center justify-center flex-shrink-0 text-orange">
+                                    {ev.type === 'video' ? <Video size={14} /> : ev.type === 'image' ? <ImageIcon size={14} /> : <FileText size={14} />}
                                   </div>
                                   <div className="min-w-0 flex-1">
                                     <p className="text-xs font-bold text-white truncate">{ev.name || ev.category}</p>
                                     <p className="text-[10px] text-text-dim">{ev.category}</p>
                                   </div>
-                                  {ev.url && (ev.type === 'image' || ev.type === 'video') && (
-                                    <button
-                                      className="flex-shrink-0 text-orange/60 hover:text-orange transition-colors"
-                                      onClick={() => setFullScreenMedia({ url: ev.url!, type: ev.type as 'image' | 'video' })}
-                                    >
-                                      <Eye size={14} />
-                                    </button>
-                                  )}
                                 </div>
                               ))}
                             </div>
@@ -5610,24 +6022,24 @@ ${renderIdentifiers(ban.identifiers)}
                  <div className="flex flex-wrap justify-center gap-8 pb-4">
                    <TeamCard img="https://i.postimg.cc/67PvHZ08/ce8f0b8d33b78b374f1bb5befb384664.webp" name="Hazem" role="Manager" />
                    <TeamCard img="https://i.postimg.cc/bGrnHgQn/a600e837cb02c2686385ec98c653b650.webp" name="Abdulmalik" role="Manager" highlight />
-                   <TeamCard img="https://i.postimg.cc/YqSVNV34/a08a8e01bef71ad9a7a6d997ff316aac.webp" name="ERIC" role="Manager" />
+                   <TeamCard img="https://i.postimg.cc/McHBb5yj/1a193e863f6c77744178d5e35aa5b2f4.webp" name="ERIC" role="Manager" />
                  </div>
                </div>
 
                <div className="flex flex-col items-center">
                  <div className="section-title text-xl text-orange font-bold border-r-4 border-orange pr-4 mb-4 font-orbitron self-start">Leader</div>
-                 <TeamCard img="https://i.postimg.cc/Fs9vMDxV/Leon.jpg" name="Meshal" role="Team Leader" />
+                 <TeamCard img="https://i.postimg.cc/d7fyWCB1/08dc51c773720277f5ff1070bab6d13e.webp" name="Meshal" role="Team Leader" />
                </div>
 
                <div>
                  <div className="section-title text-xl text-orange font-bold border-r-4 border-orange pr-4 mb-8 font-orbitron">Members</div>
                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-7 gap-4">
                    {[
-                     { img: "https://i.postimg.cc/bv03fHT7/5ef8b1f0a07e532d9a5e6d46ac6958b8.webp", name: "Qm7md" },
-                     { img: "https://i.postimg.cc/G3XgpKCK/03cf8139d358de47d3fbf8fe5bf7c3ef.webp", name: "Saad" },
-                     { img: "https://i.postimg.cc/d146Lsz1/293df0d2a90c6f742af136800d4847f5.webp", name: "Mjeed" },
-                     { img: "https://i.postimg.cc/9QRnK7sy/c5a488644728e1e6e4461093a36a3358.webp", name: "Mod" },
-                     { img: "https://i.postimg.cc/3JPBybbH/20e51a6949fa43427da705e503dd6395.webp", name: "Rakan" },
+                     { img: "https://i.postimg.cc/B8zKhFgL/e8aae06603194b6be3576ea76bff3281.webp", name: "Qm7md" },
+                     { img: "https://i.postimg.cc/8FY6yvHF/4f061a337c25e1054e07f6e4e35e76b6.webp", name: "Saad" },
+                     { img: "https://i.postimg.cc/KKWM9TNR/9ce4c94a556a96c2bfe1333cb8ee0dc5.webp", name: "Mjeed" },
+                     { img: "https://i.postimg.cc/GBfyMDQ9/770dd8597a42a19217a035305a352aee.webp", name: "Mod" },
+                     { img: "https://i.postimg.cc/JyFkTXqh/a983d12b6e78113d823387c14c442b61.webp", name: "Rakan" },
                      { img: "https://i.postimg.cc/LqW1yPT8/60b49929b666ef976263261f2d59357d.webp", name: "WL2" },
                      { img: "https://i.postimg.cc/v1KVPnzH/1756a6bd283fd95ccd48509c92e75af6.webp", name: "RT" },
                    ].map((m, i) => (
@@ -5635,6 +6047,340 @@ ${renderIdentifiers(ban.identifiers)}
                    ))}
                  </div>
                </div>
+            </motion.div>
+          )}
+
+          {/* PRE-WL HACKS PAGE */}
+          {activeSec === 'pre_wl_hacks' && isStaff && (
+            <motion.div key="pre_wl_hacks" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="space-y-6 px-[4%]" dir="rtl">
+
+              {/* Header — same as PC-CHECK */}
+              <div className="card glow-hover border-r-[6px] border-red-500 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-12 h-12 rounded-2xl bg-red-500/10 flex items-center justify-center shrink-0">
+                      <ShieldAlert className="text-red-400" size={24} />
+                    </div>
+                    <div>
+                      <h1 className="font-orbitron text-2xl sm:text-3xl font-black">الهاكات قبل <span className="text-red-400">الوايت لست</span></h1>
+                      <p className="text-text-dim text-xs mt-0.5">سجلات اللاعبين المرصودين أو المبندين قبل دخول الوايت لست</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <span className="bg-red-500/10 border border-red-500/30 text-red-400 font-orbitron font-black text-sm px-3 py-1.5 rounded-xl">
+                      {preWLHacks.length} سجل
+                    </span>
+                    {isStaff && (
+                      <button className="btn-gold flex items-center gap-2 text-sm" onClick={() => { setPreWLShowForm(true); setPreWLEditId(null); setPreWLForm({ rawText: '', bannedFrom: '', hackActive: 'yes', imageBase64: '' }); }}>
+                        <Plus size={16} /> إضافة سجل
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Search + Filter — same layout as PC-CHECK */}
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <div className="relative flex-1">
+                    <Search size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-text-dim" />
+                    <input
+                      className="input-field pr-10 text-sm"
+                      placeholder="ابحث باسم اللاعب، License، Steam، Discord، XBL، IP..."
+                      value={preWLSearch}
+                      onChange={e => { setPreWLSearch(e.target.value); if (e.target.value.trim()) addAuditLog('Pre-WL: بحث', `بحث: ${e.target.value.trim()}`); }}
+                      dir="ltr"
+                    />
+                  </div>
+                  <select value={preWLFilter} onChange={e => setPreWLFilter(e.target.value as any)} className="input-field sm:w-48 text-sm">
+                    <option value="all">كل السجلات</option>
+                    <option value="active">متفعل فقط</option>
+                    <option value="inactive">غير متفعل فقط</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Add/Edit Form — same as PC-CHECK form */}
+              <AnimatePresence>
+                {preWLShowForm && isStaff && (
+                  <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="card border border-red-500/30 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <h2 className="font-orbitron font-black text-lg">{preWLEditId ? 'تعديل السجل' : 'إضافة سجل جديد'}</h2>
+                      <button onClick={() => { setPreWLShowForm(false); setPreWLEditId(null); }} className="bg-white/5 hover:bg-white/10 p-2 rounded-xl transition-all"><X size={16} /></button>
+                    </div>
+
+                    {/* Raw text paste */}
+                    <div>
+                      <label className="block text-xs text-text-dim mb-1.5">بيانات اللاعب — الصق النص كاملاً *</label>
+                      <textarea
+                        className="input-field text-sm min-h-[140px] font-mono resize-y"
+                         placeholder={`FARS.94
+license:(license:82e0973cd8dc22f8...)
+steam:(steam:11000015bf85d3b)
+discord:(discord:884529862147203123)
+xbl:(xbl:2535466718541234)
+liveid:(live:914799877748386)
+ip:(ip:176.45.175.252)`}
+                        value={preWLForm.rawText}
+                        onChange={e => setPreWLForm(f => ({ ...f, rawText: e.target.value }))}
+                        dir="ltr"
+                      />
+                      {/* Live preview */}
+                      {preWLForm.rawText.trim() && (() => {
+                        const p = parsePreWLRaw(preWLForm.rawText);
+                        const rows: [string, string][] = [];
+                        if (p.playerName) rows.push(['اسم اللاعب', p.playerName]);
+                        p.licenses.forEach((v, i) => rows.push([i === 0 ? 'License' : `License${i + 1}`, v]));
+                        p.steams.forEach((v, i) => rows.push([i === 0 ? 'Steam' : `Steam ${i + 1}`, v]));
+                        p.discords.forEach((v, i) => rows.push([i === 0 ? 'Discord' : `Discord ${i + 1}`, v]));
+                        if (p.xbl) rows.push(['XBL', p.xbl]);
+                        if (p.liveId) rows.push(['Live ID', p.liveId]);
+                        if (p.ip) rows.push(['IP', p.ip]);
+                        return rows.length > 0 ? (
+                          <div className="mt-2 p-3 rounded-xl bg-green-500/5 border border-green-500/20 grid grid-cols-1 sm:grid-cols-2 gap-1">
+                            {rows.map(([l, v]) => (
+                              <div key={l} className="flex items-center gap-2 text-xs">
+                                <span className="text-text-dim w-24 shrink-0">{l}:</span>
+                                <span className="text-green-400 font-mono truncate">{v}</span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null;
+                      })()}
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {/* Banned from */}
+                      <div>
+                        <label className="block text-xs text-text-dim mb-1.5">متبند من أي سيرفر؟ *</label>
+                        <input className="input-field text-sm" placeholder="اسم السيرفر..." value={preWLForm.bannedFrom} onChange={e => setPreWLForm(f => ({ ...f, bannedFrom: e.target.value }))} />
+                      </div>
+                      {/* Hack active — same toggle style as PC-CHECK cheater */}
+                      <div>
+                        <label className="block text-xs text-text-dim mb-1.5">هل الهاك متفعل؟ *</label>
+                        <div className="flex bg-black/40 p-1 rounded-xl border border-white/5">
+                          <button type="button" onClick={() => setPreWLForm(f => ({ ...f, hackActive: 'no' }))} className={`flex-1 py-2 rounded-lg text-xs font-black transition-all ${preWLForm.hackActive === 'no' ? 'bg-emerald-500/20 text-emerald-400' : 'text-text-dim'}`}>
+                            لا — غير متفعل
+                          </button>
+                          <button type="button" onClick={() => setPreWLForm(f => ({ ...f, hackActive: 'yes' }))} className={`flex-1 py-2 rounded-lg text-xs font-black transition-all ${preWLForm.hackActive === 'yes' ? 'bg-red-500/20 text-red-400' : 'text-text-dim'}`}>
+                            نعم — متفعل
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Image upload */}
+                    <div>
+                      <label className="block text-xs text-text-dim mb-1.5">صورة مرفقة (اختياري)</label>
+                      <div className="flex items-center gap-3">
+                        <label htmlFor="prewl-img-upload" className="cursor-pointer bg-orange/10 px-4 py-2.5 rounded-xl border border-orange/20 hover:bg-orange/20 transition-all text-sm text-orange flex items-center gap-2">
+                          <Upload size={14} /> {preWLForm.imageBase64 ? 'تغيير الصورة' : 'رفع صورة'}
+                        </label>
+                        <input type="file" accept="image/*" id="prewl-img-upload" className="hidden" onChange={preWLImageUpload} />
+                        {preWLForm.imageBase64 && (
+                          <div className="relative">
+                            <img src={preWLForm.imageBase64} className="h-14 w-14 rounded-xl object-cover border border-white/10 cursor-pointer" onClick={() => setFullScreenMedia({ url: preWLForm.imageBase64!, type: 'image' })} />
+                            <button className="absolute -top-1.5 -right-1.5 bg-red-500 rounded-full p-0.5 hover:bg-red-600 transition-colors" onClick={() => setPreWLForm(f => ({ ...f, imageBase64: '' }))}><X size={10} /></button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <button className="btn-gold w-full" onClick={preWLSave}>{preWLEditId ? 'حفظ التعديلات' : 'حفظ السجل'}</button>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              {/* Detail view — fixed full-screen overlay, same style as Evidence / Ban Form modals */}
+              <AnimatePresence>
+                {preWLView === 'detail' && preWLSelected && (() => {
+                  const hack = preWLHacks.find(h => h.id === preWLSelected.id) || preWLSelected;
+                  return (
+                    <motion.div
+                      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                      className="fixed inset-0 z-[150] bg-black/95 backdrop-blur-2xl flex items-center justify-center p-4"
+                      dir="rtl"
+                      onClick={() => { setPreWLSelected(null); setPreWLView('list'); }}
+                    >
+                      <motion.div
+                        initial={{ opacity: 0, scale: 0.97, y: 16 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.97, y: 16 }}
+                        className="card border border-orange/20 w-full max-w-4xl max-h-[92vh] shadow-[0_0_80px_rgba(255,106,0,0.12)] flex flex-col overflow-hidden !p-0"
+                        onClick={e => e.stopPropagation()}
+                      >
+                        {/* Detail header — fixed, never scrolls */}
+                        <div className="flex items-start justify-between gap-4 flex-wrap p-7 border-b border-white/5 shrink-0">
+                          <div className="space-y-2">
+                            <div className="flex items-center gap-3 flex-wrap">
+                              <h2 className="font-orbitron font-black text-2xl text-white">{hack.playerName || 'غير معروف'}</h2>
+                              <span className={`px-3.5 py-1.5 rounded-full text-xs font-black border ${hack.hackActive === 'yes' ? 'bg-red-500/15 text-red-400 border-red-500/30' : 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'}`}>
+                                حالة الهاك: {hack.hackActive === 'yes' ? 'متفعل 🔴' : 'غير متفعل 🟢'}
+                              </span>
+                            </div>
+                            <p className="text-sm text-text-dim flex items-center gap-1.5"><Server size={13} /> متبند من: <span className="text-white font-bold">{hack.bannedFrom}</span></p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button className="bg-white/5 hover:bg-orange/10 hover:text-orange border border-white/10 hover:border-orange/30 px-3.5 py-2 rounded-xl text-xs transition-all flex items-center gap-1.5" onClick={() => preWLCopyAll(hack)}>
+                              {preWLCopied === 'all-' + hack.id ? <><Check size={12} className="text-green-400" /> تم!</> : <><Copy size={12} /> نسخ الكل</>}
+                            </button>
+                            <button className="bg-white/5 hover:bg-white/10 p-2.5 rounded-xl transition-all" onClick={() => { setPreWLSelected(null); setPreWLView('list'); }}><X size={16} /></button>
+                          </div>
+                        </div>
+
+                        {/* Scrollable body */}
+                        <div className="flex-1 overflow-y-auto custom-scrollbar p-7 space-y-6">
+                        {/* Identifiers with copy buttons */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                          {(() => {
+                            const fields: [string, string, string][] = [];
+                            if (hack.playerName) fields.push(['اسم اللاعب', 'name', hack.playerName]);
+                            (hack.licenses?.length ? hack.licenses : [hack.license, hack.license2].filter(Boolean))
+                              .forEach((v, i) => fields.push([i === 0 ? 'License' : `License${i + 1}`, `license${i > 0 ? i + 1 : ''}`, v]));
+                            (hack.steams?.length ? hack.steams : [hack.steam].filter(Boolean))
+                              .forEach((v, i) => fields.push([i === 0 ? 'Steam' : `Steam ${i + 1}`, `steam${i > 0 ? i + 1 : ''}`, v]));
+                            (hack.discords?.length ? hack.discords : [hack.discord].filter(Boolean))
+                              .forEach((v, i) => fields.push([i === 0 ? 'Discord' : `Discord ${i + 1}`, `discord${i > 0 ? i + 1 : ''}`, v]));
+                            if (hack.xbl) fields.push(['XBL', 'xbl', hack.xbl]);
+                            if (hack.liveId) fields.push(['Live ID', 'liveId', hack.liveId]);
+                            if (hack.ip) fields.push(['IP Address', 'ip', hack.ip]);
+                            return fields.map(([label, field, val]) => (
+                              <div key={field} className="flex items-center gap-3 p-3.5 rounded-xl bg-green-500/5 border border-green-500/15">
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-[11px] text-text-dim mb-1">{label}</p>
+                                  <p className="text-[15px] font-mono text-green-400 break-all">{val}</p>
+                                </div>
+                                <button className="shrink-0 bg-white/5 hover:bg-green-500/10 hover:text-green-400 border border-white/10 hover:border-green-500/30 p-2 rounded-lg transition-all" onClick={() => preWLCopyField(hack.id, field, val)}>
+                                  {preWLCopied === field + '-' + hack.id ? <Check size={13} className="text-green-400" /> : <Copy size={13} />}
+                                </button>
+                              </div>
+                            ));
+                          })()}
+                        </div>
+
+                        {/* Image */}
+                        {hack.imageBase64 && (
+                          <div>
+                            <p className="text-xs text-text-dim mb-2">الصورة المرفقة</p>
+                            <img src={hack.imageBase64} className="h-48 rounded-xl object-cover border border-white/10 cursor-pointer hover:opacity-90 transition-opacity" onClick={() => setFullScreenMedia({ url: hack.imageBase64!, type: 'image' })} />
+                          </div>
+                        )}
+
+                        {/* Raw text */}
+                        <div>
+                          <p className="text-xs text-text-dim mb-2">النص الأصلي</p>
+                          <pre className="bg-black/40 rounded-xl p-4 text-xs font-mono text-white/70 overflow-x-auto border border-white/5 whitespace-pre-wrap" dir="ltr">{hack.rawText}</pre>
+                        </div>
+
+                        {/* Meta */}
+                        <div className="grid sm:grid-cols-2 gap-3 text-xs text-text-dim border-t border-white/5 pt-4">
+                          <span>أضافه: <span className="text-white font-bold">{hack.createdBy}</span> <span className="text-orange">({hack.createdByRole})</span> • {new Date(hack.createdAt).toLocaleString('ar-SA')}</span>
+                          {hack.updatedBy && <span>آخر تعديل: <span className="text-white font-bold">{hack.updatedBy}</span> <span className="text-orange">({hack.updatedByRole})</span> • {new Date(hack.updatedAt!).toLocaleString('ar-SA')}</span>}
+                        </div>
+
+                        {/* Activity Timeline */}
+                        {hack.timeline && hack.timeline.length > 0 && (
+                          <div className="space-y-3 border-t border-white/5 pt-4">
+                            <h4 className="text-xs font-black text-orange uppercase tracking-widest font-orbitron flex items-center gap-2"><Clock size={12} /> Activity Timeline</h4>
+                            <div className="space-y-2">
+                              {[...hack.timeline].reverse().map((ev, i) => (
+                                <div key={i} className="flex gap-3 text-xs">
+                                  <div className="w-1.5 h-1.5 rounded-full bg-orange mt-1.5 shrink-0" />
+                                  <div>
+                                    <span className="text-white font-bold">{ev.action}</span>
+                                    <span className="text-text-dim"> — {ev.by} </span>
+                                    <span className="text-orange text-[10px]">({ev.byRole})</span>
+                                    <span className="text-text-dim font-mono text-[10px] block">{new Date(ev.at).toLocaleString('ar-SA')}</span>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        </div>
+                      </motion.div>
+                    </motion.div>
+                  );
+                })()}
+              </AnimatePresence>
+
+              {/* Records list — same card style as PC-CHECK */}
+              <div className="grid gap-3">
+                {preWLFiltered.map(hack => (
+                  <div
+                    key={hack.id}
+                    className={`card glow-hover space-y-3 border cursor-pointer ${hack.hackActive === 'yes' ? 'border-red-500/20' : 'border-white/5'}`}
+                    onClick={() => {
+                        setPreWLSelected(hack);
+                        setPreWLView('detail');
+                      }}
+                  >
+                    <div className="flex items-start justify-between gap-4">
+                      {/* Icon + name + status */}
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${hack.hackActive === 'yes' ? 'bg-red-500/10 text-red-400' : 'bg-emerald-500/10 text-emerald-400'}`}>
+                          {hack.hackActive === 'yes' ? <ShieldAlert size={18} /> : <ShieldCheck size={18} />}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="font-bold text-white truncate">{hack.playerName || 'غير معروف'}</p>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className={`text-[10px] font-black uppercase tracking-widest ${hack.hackActive === 'yes' ? 'text-red-400' : 'text-emerald-400'}`}>
+                              حالة الهاك: {hack.hackActive === 'yes' ? 'متفعل 🔴' : 'غير متفعل 🟢'}
+                            </span>
+                            <span className="text-[10px] text-text-dim">🚫 {hack.bannedFrom}</span>
+                          </div>
+                        </div>
+                      </div>
+                      {/* Action buttons */}
+                      <div className="flex items-center gap-2 shrink-0" onClick={e => e.stopPropagation()}>
+                        <button
+                          onClick={() => preWLCopyAll(hack)}
+                          className="bg-white/5 hover:bg-orange/10 hover:text-orange border border-white/10 hover:border-orange/30 px-2.5 py-1.5 rounded-xl text-xs transition-all flex items-center gap-1.5"
+                        >
+                          {preWLCopied === 'all-' + hack.id ? <Check size={11} className="text-green-400" /> : <Copy size={11} />}
+                          {preWLCopied === 'all-' + hack.id ? 'تم!' : 'نسخ'}
+                        </button>
+                        {(isManager || hack.createdBy === currentUser?.user) && (
+                          <button onClick={() => { setPreWLShowForm(true); preWLStartEdit(hack); }} className="bg-white/5 hover:bg-orange/10 hover:text-orange border border-white/10 hover:border-orange/30 px-2.5 py-1.5 rounded-xl text-xs transition-all flex items-center gap-1.5">
+                            <Settings size={11} /> تعديل
+                          </button>
+                        )}
+                        {isManager && (
+                          <button onClick={() => preWLDelete(hack.id)} className="bg-white/5 hover:bg-red-500/10 hover:text-red-400 border border-white/10 hover:border-red-500/30 px-2.5 py-1.5 rounded-xl text-xs transition-all flex items-center gap-1.5">
+                            <Trash2 size={11} /> حذف
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Identifiers grid — same style as PC-CHECK data grid */}
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs font-mono bg-black/30 rounded-xl p-3 border border-white/5" dir="ltr">
+                      {[['License', hack.license], ['Steam', hack.steam], ['Discord', hack.discord], ['XBL', hack.xbl], ['Live ID', hack.liveId], ['IP', hack.ip]].filter(([,v]) => v).map(([l, v]) => (
+                        <div key={l} className="flex flex-col gap-0.5">
+                          <span className="text-text-dim text-[10px]">{l}:</span>
+                          <span className="text-green-400 break-all">{v}</span>
+                        </div>
+                      ))}
+                    </div>
+
+                    {hack.imageBase64 && (
+                      <img src={hack.imageBase64} className="h-20 rounded-xl object-cover border border-white/10 cursor-pointer hover:opacity-80 transition-opacity" onClick={e => { e.stopPropagation(); setFullScreenMedia({ url: hack.imageBase64!, type: 'image' }); }} />
+                    )}
+
+                    <div className="flex items-center justify-between text-[10px] text-text-dim pt-2 border-t border-white/5">
+                      <span>أضافه: <span className="text-white font-bold">{hack.createdBy}</span> <span className="text-orange">({hack.createdByRole})</span></span>
+                      <span className="font-mono">{new Date(hack.createdAt).toLocaleString('ar-SA')}</span>
+                    </div>
+                  </div>
+                ))}
+
+                {/* Empty state — same as PC-CHECK */}
+                {preWLFiltered.length === 0 && (
+                  <div className="card text-center py-16 text-text-dim">
+                    <ShieldAlert size={32} className="mx-auto mb-3 opacity-30" />
+                    <p className="text-sm">{preWLHacks.length === 0 ? 'لا توجد سجلات حالياً — ابدأ بإضافة أول سجل' : 'لا توجد نتائج مطابقة لمعايير البحث'}</p>
+                  </div>
+                )}
+              </div>
+
+
+
             </motion.div>
           )}
 
@@ -5657,49 +6403,6 @@ ${renderIdentifiers(ban.identifiers)}
           )}
         </AnimatePresence>
       </main>
-
-      {/* Image / Video Preview Modal */}
-      <AnimatePresence>
-        {selectedPreview && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[250] bg-black/95 backdrop-blur-md flex items-center justify-center p-4"
-            onClick={() => setSelectedPreview(null)}
-          >
-            <motion.div
-              initial={{ scale: 0.92, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.92, opacity: 0 }}
-              transition={{ duration: 0.18 }}
-              className="relative max-w-4xl max-h-[90vh] w-full flex flex-col items-center gap-3"
-              onClick={e => e.stopPropagation()}
-            >
-              <div className="flex items-center justify-between w-full px-1">
-                <p className="text-sm font-bold text-white truncate">{selectedPreview.name || 'معاينة الملف'}</p>
-                <button onClick={() => setSelectedPreview(null)} className="bg-white/10 hover:bg-white/20 p-2 rounded-full transition-colors">
-                  <X size={16} />
-                </button>
-              </div>
-              {selectedPreview.type === 'image' ? (
-                <img
-                  src={selectedPreview.url}
-                  alt={selectedPreview.name}
-                  className="max-h-[80vh] max-w-full rounded-2xl object-contain shadow-[0_0_40px_rgba(0,0,0,0.8)]"
-                />
-              ) : (
-                <video
-                  src={selectedPreview.url}
-                  controls
-                  autoPlay
-                  className="max-h-[80vh] max-w-full rounded-2xl shadow-[0_0_40px_rgba(0,0,0,0.8)]"
-                />
-              )}
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
 
       {/* Command Palette — بحث شامل (Ctrl+K) */}
       <AnimatePresence>
@@ -5754,6 +6457,8 @@ ${renderIdentifiers(ban.identifiers)}
                         evidence: { icon: Layers, color: 'text-blue-400', label: 'دليل' },
                         altProfile: { icon: Network, color: 'text-purple-400', label: 'Intelligence Room' },
                         player: { icon: UserIcon, color: 'text-emerald-400', label: 'لاعب' },
+                        preWlHack: { icon: ShieldAlert, color: 'text-red-400', label: 'Pre WL Hack' },
+                        pcCheck: { icon: MonitorCheck, color: 'text-cyan-400', label: 'PC Check' },
                       };
                       const meta = kindMeta[r.kind] || { icon: Search, color: 'text-text-dim', label: '' };
                       const Icon = meta.icon;
