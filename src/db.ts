@@ -2,10 +2,52 @@ import { createClient } from '@supabase/supabase-js';
 import { User, Ticket, Ban, InvestigationCase, EvidenceItem, AltProfile, YaraRule, PCCheckRecord } from './types';
 
 // ═══════════════════════════════════════════════════════
+//  PRE-WHITELIST HACKS — TypeScript Interface
+// ═══════════════════════════════════════════════════════
+export interface PreWLHack {
+  id: number;
+  raw_text?: string;
+  player_name?: string;
+  license?: string;
+  license2?: string;
+  licenses?: string[] | string;
+  steam?: string;
+  steams?: string[] | string;
+  discord?: string;
+  discords?: string[] | string;
+  xbl?: string;
+  live_id?: string;
+  ip?: string;
+  banned_from?: string;
+  hack_active?: boolean;
+  image_base64?: string;
+  created_by?: string;
+  created_by_role?: string;
+  created_at?: string;
+  updated_by?: string;
+  updated_by_role?: string;
+  updated_at?: string;
+  timeline?: { action: string; by: string; byRole: string; at: number; old?: string; new?: string }[] | string;
+  // camelCase aliases — للتوافق مع app.tsx
+  rawText?: string;
+  playerName?: string;
+  liveId?: string;
+  bannedFrom?: string;
+  hackActive?: 'yes' | 'no';
+  imageBase64?: string;
+  createdBy?: string;
+  createdByRole?: string;
+  createdAt?: number;
+  updatedBy?: string;
+  updatedByRole?: string;
+  updatedAt?: number;
+}
+
+// ═══════════════════════════════════════════════════════
 //  LOCAL DATABASE — IndexedDB Fallback
 // ═══════════════════════════════════════════════════════
 const DB_NAME = 'MT_Logs_DB';
-const DB_VERSION = 9;
+const DB_VERSION = 10;
 
 export const openDB = (): Promise<IDBDatabase> => {
   return new Promise((resolve, reject) => {
@@ -72,6 +114,18 @@ export const openDB = (): Promise<IDBDatabase> => {
         pcStore.createIndex('hwid', 'hwid');
         pcStore.createIndex('isCheater', 'isCheater');
         pcStore.createIndex('createdAt', 'createdAt');
+      }
+      if (!db.objectStoreNames.contains('pre_wl_hacks')) {
+        const preWlStore = db.createObjectStore('pre_wl_hacks', { keyPath: 'id' });
+        preWlStore.createIndex('player_name', 'player_name');
+        preWlStore.createIndex('license', 'license');
+        preWlStore.createIndex('steam', 'steam');
+        preWlStore.createIndex('discord', 'discord');
+        preWlStore.createIndex('xbl', 'xbl');
+        preWlStore.createIndex('live_id', 'live_id');
+        preWlStore.createIndex('ip', 'ip');
+        preWlStore.createIndex('hack_active', 'hack_active');
+        preWlStore.createIndex('created_at', 'created_at');
       }
     };
   });
@@ -261,7 +315,8 @@ export const dbDiagnostics: DbDiagnosticInfo = {
 // الجداول الموجودة فعلاً في Supabase — أي جدول خارج هذه القائمة يُوجَّه مباشرة لـ IndexedDB
 const SUPABASE_TABLES = new Set([
   'users', 'tickets', 'bans', 'audit_logs', 'personal_notes',
-  'cases', 'evidence_items', 'alt_profiles', 'yara_rules', 'pc_checks'
+  'cases', 'evidence_items', 'alt_profiles', 'yara_rules', 'pc_checks',
+  'pre_wl_hacks'
 ]);
 
 export const getAll = async <T>(storeName: string): Promise<T[]> => {
@@ -599,7 +654,7 @@ export const calculateRiskAssessment = (
 //  GLOBAL SEARCH — يبحث عبر اللاعبين/القضايا/البلاوات/الأدلة
 // ═══════════════════════════════════════════════════════
 
-export type SearchResultKind = 'case' | 'ban' | 'evidence' | 'player' | 'altProfile';
+export type SearchResultKind = 'case' | 'ban' | 'evidence' | 'player' | 'altProfile' | 'preWlHack' | 'pcCheck';
 
 export interface SearchResult {
   kind: SearchResultKind;
@@ -614,7 +669,9 @@ export const globalSearch = (
   cases: InvestigationCase[],
   bans: Ban[],
   evidenceItems: EvidenceItem[],
-  altProfiles: AltProfile[] = []
+  altProfiles: AltProfile[] = [],
+  preWlHacks: PreWLHack[] = [],
+  pcChecks: PCCheckRecord[] = []
 ): SearchResult[] => {
   const q = query.trim().toLowerCase();
   if (!q) return [];
@@ -658,6 +715,52 @@ export const globalSearch = (
       results.push({
         kind: 'altProfile', id: p.id, title: p.primaryName ? `${p.primaryName} (Discord: ${p.primaryId})` : `Discord: ${p.primaryId}`,
         subtitle: `Intelligence Room • ${p.linkedIds.length} حساب مرتبط`, discordId: p.primaryId,
+      });
+    }
+  }
+
+  // PC Checks — يبحث في اسم اللاعب والـ HWID والـ PIN والملاحظات
+  for (const r of pcChecks) {
+    const haystack = `${r.player || ''} ${r.hwid || ''} ${r.pin || ''} ${r.notes || ''}`.toLowerCase();
+    if (haystack.includes(q)) {
+      results.push({
+        kind: 'pcCheck',
+        id: r.id,
+        title: r.player || `PC Check #${r.id}`,
+        subtitle: `PC Check • ${r.isCheater ? '🔴 Cheater' : '🟢 Clean'}${r.hwid ? ' • ' + r.hwid : ''}`,
+      });
+    }
+  }
+
+  // Pre WL Hacks — يبحث في كل المعرفات والاسم بما فيها المتعددة
+  for (const h of preWlHacks) {
+    // دالة مساعدة لتحويل array أو JSON string إلى array
+    const toArr = (v: string[] | string | undefined): string[] => {
+      if (!v) return [];
+      if (Array.isArray(v)) return v;
+      try { const p = JSON.parse(v); return Array.isArray(p) ? p : [v]; } catch { return [v]; }
+    };
+    const allLicenses = toArr(h.licenses).length ? toArr(h.licenses) : [h.license, h.license2].filter(Boolean) as string[];
+    const allSteams   = toArr(h.steams).length   ? toArr(h.steams)   : [h.steam].filter(Boolean) as string[];
+    const allDiscords = toArr(h.discords).length  ? toArr(h.discords) : [h.discord].filter(Boolean) as string[];
+
+    const haystack = [
+      h.player_name || h.playerName || '',
+      ...allLicenses,
+      ...allSteams,
+      ...allDiscords,
+      h.xbl || '',
+      h.live_id || h.liveId || '',
+      h.ip || '',
+      h.banned_from || h.bannedFrom || '',
+    ].join(' ').toLowerCase();
+
+    if (haystack.includes(q)) {
+      results.push({
+        kind: 'preWlHack',
+        id: h.id,
+        title: h.player_name || h.playerName || `Pre WL Hack #${h.id}`,
+        subtitle: `Pre WL Hack • ${h.hack_active || h.hackActive === 'yes' ? '🔴 هاك نشط' : '⚪ غير نشط'}${allLicenses[0] ? ' • ' + allLicenses[0] : ''}`,
       });
     }
   }
