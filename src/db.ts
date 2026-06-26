@@ -163,40 +163,86 @@ const supabaseUrl: string = import.meta.env.VITE_SUPABASE_URL || '';
 // @ts-ignore
 const supabaseAnonKey: string = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 
-// المستخدم الحالي — يُحدَّث عند تسجيل الدخول
-let _currentUsername: string = '';
+// ═══════════════════════════════════════════════════════
+//  SESSION TOKEN — بديل آمن عن x-user header
+// ═══════════════════════════════════════════════════════
+// الـ token يُحفظ هنا بالذاكرة + localStorage (نفس مكان تشفير الجلسة الحالي).
+// كل طلب لـ db-proxy يرسل هذا التوكن بـ header، والخادم (service_role)
+// هو اللي يتحقق منه ويحدد هوية المستخدم وصلاحياته — لا يمكن تزويره من DevTools
+// لأنه عشوائي 256-bit ومخزّن بجدول sessions، وما يتحكم فيه المتصفح بأي شكل.
+const SESSION_TOKEN_KEY = 'mt_session_token';
 
-export const setCurrentUsername = (username: string) => {
-  _currentUsername = username;
+let _sessionToken: string | null = (() => {
+  try { return localStorage.getItem(SESSION_TOKEN_KEY); } catch { return null; }
+})();
+
+export const setSessionToken = (token: string | null) => {
+  _sessionToken = token;
+  try {
+    if (token) localStorage.setItem(SESSION_TOKEN_KEY, token);
+    else localStorage.removeItem(SESSION_TOKEN_KEY);
+  } catch { /* ignore (private mode إلخ) */ }
 };
 
+export const getSessionToken = (): string | null => _sessionToken;
+
+// محتفظين بهذا للتوافق الخلفي مع أي كود قديم يستدعيها — لم تعد تؤثر على الأمان،
+// كل التحقق الفعلي صار عبر session token بالخادم.
+export const setCurrentUsername = (_username: string) => {};
+
 /**
- * Supabase client مع header المستخدم في كل طلب
- * الـ RLS policies تقرأ x-user للتحقق من الصلاحية
+ * Supabase client بصلاحية anon فقط — يُستخدم حالياً فقط لقناة Realtime
+ * (الاستماع للتغييرات)، وليس للقراءة/الكتابة المباشرة على الجداول.
+ * RLS على كل الجداول يمنع anon من القراءة/الكتابة المباشرة تماماً —
+ * البيانات الفعلية تصل فقط عبر db-proxy Edge Function (service_role).
  */
 const makeSupabaseClient = () => {
   if (!supabaseUrl || !supabaseAnonKey) return null;
-  return createClient(supabaseUrl, supabaseAnonKey, {
-    global: {
-      headers: {
-        'x-user': _currentUsername
-      }
-    }
-  });
+  return createClient(supabaseUrl, supabaseAnonKey);
 };
 
 export const supabase = makeSupabaseClient();
 
-// للطلبات اللي تحتاج header محدّث (بعد login)
-export const getSupabaseWithUser = (username?: string) => {
-  if (!supabaseUrl || !supabaseAnonKey) return null;
-  return createClient(supabaseUrl, supabaseAnonKey, {
-    global: {
+// محتفظين بنفس الاسم للتوافق مع استدعاءات app.tsx الحالية (مثل preWLSave) —
+// ترجع نفس anon client، يُستخدم فقط لو احتجت استدعاء supabase.channel(...) مباشرة.
+export const getSupabaseWithUser = (_username?: string) => supabase;
+
+// ═══════════════════════════════════════════════════════
+//  DB-PROXY — البوابة الموحدة لكل عمليات القراءة/الكتابة/الحذف
+// ═══════════════════════════════════════════════════════
+const callDbProxy = async (body: {
+  table: string;
+  action: 'select' | 'insert' | 'upsert' | 'update' | 'delete';
+  payload?: any;
+  match?: Record<string, any>;
+  select?: string;
+}): Promise<{ data: any; error: { message: string } | null }> => {
+  if (!supabaseUrl || !supabaseAnonKey) {
+    return { data: null, error: { message: 'Supabase غير مهيّأ' } };
+  }
+  const token = getSessionToken();
+  if (!token) {
+    return { data: null, error: { message: 'لا يوجد تسجيل دخول نشط (no session token)' } };
+  }
+  try {
+    const res = await fetch(`${supabaseUrl}/functions/v1/db-proxy`, {
+      method: 'POST',
       headers: {
-        'x-user': username || _currentUsername
-      }
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${supabaseAnonKey}`,
+        'apikey': supabaseAnonKey,
+        'x-session-token': token,
+      },
+      body: JSON.stringify(body),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return { data: null, error: { message: json?.error || `HTTP ${res.status}` } };
     }
-  });
+    return { data: json.data, error: null };
+  } catch (e: any) {
+    return { data: null, error: { message: e?.message || String(e) } };
+  }
 };
 
 // ═══════════════════════════════════════════════════════
@@ -309,96 +355,264 @@ export const dbDiagnostics: DbDiagnosticInfo = {
 };
 
 // ═══════════════════════════════════════════════════════
-//  CRUD — مع Supabase أولاً ثم IndexedDB fallback
+//  CRUD — عبر db-proxy Edge Function (service_role) فقط
 // ═══════════════════════════════════════════════════════
+// ⚠️ تنبيه أمني مهم: لم نعد نتصل بـ Supabase مباشرة من المتصفح لهذي الجداول.
+// كل القراءة/الكتابة تمر عبر db-proxy، والخادم هو من يقرر الصلاحية.
+// الـ IndexedDB المحلي يُستخدم الآن فقط كـ "وضعية عدم اتصال" حقيقية —
+// نُظهر للمستخدم تحذير صريح بهذا (عبر dbDiagnostics) بدل الصمت الكامل،
+// لأن الصمت هو ما تسبب بمشكلتك الأصلية (بيانات تبدو محفوظة لكنها محلية فقط).
 
-// الجداول الموجودة فعلاً في Supabase — أي جدول خارج هذه القائمة يُوجَّه مباشرة لـ IndexedDB
 const SUPABASE_TABLES = new Set([
   'users', 'tickets', 'bans', 'audit_logs', 'personal_notes',
   'cases', 'evidence_items', 'alt_profiles', 'yara_rules', 'pc_checks',
-  'pre_wl_hacks'
+  'pre_wl_hacks', 'reports'
 ]);
 
+// أخطاء "حقيقية بالشبكة" (انقطاع نت، الخادم نايم) يصح نرجع فيها لـ IndexedDB مؤقتاً.
+// أخطاء "صلاحية/جلسة" (401/403) ما يصح نخفيها بـ fallback — لازم تظهر بوضوح
+// لأنها تعني إن المستخدم غير مسجل دخول فعلياً أو ما له صلاحية، مش مشكلة شبكة.
+const isAuthError = (message: string) =>
+  /unauthorized|no session|invalid session|expired|inactive|صلاحية/i.test(message);
+
 export const getAll = async <T>(storeName: string): Promise<T[]> => {
-  const client = getSupabaseWithUser();
-  if (client && SUPABASE_TABLES.has(storeName)) {
-    try {
-      const { data, error } = await client.from(storeName).select('*');
-      if (error) {
-        dbDiagnostics.hasErrors = true;
-        dbDiagnostics.lastErrorMessage = error.message;
-        dbDiagnostics.tableErrors[storeName] = error.message;
-        return localGetAll<T>(storeName);
-      }
+  if (SUPABASE_TABLES.has(storeName) && supabaseUrl) {
+    const { data, error } = await callDbProxy({ table: storeName, action: 'select' });
+    if (!error) {
       delete dbDiagnostics.tableErrors[storeName];
       if (Object.keys(dbDiagnostics.tableErrors).length === 0) {
         dbDiagnostics.hasErrors = false;
         dbDiagnostics.lastErrorMessage = null;
       }
       return (data as T[]) || [];
-    } catch (e: any) {
-      dbDiagnostics.hasErrors = true;
-      dbDiagnostics.lastErrorMessage = e?.message || String(e);
-      dbDiagnostics.tableErrors[storeName] = e?.message || String(e);
-      return localGetAll<T>(storeName);
     }
+    dbDiagnostics.hasErrors = true;
+    dbDiagnostics.lastErrorMessage = error.message;
+    dbDiagnostics.tableErrors[storeName] = error.message;
+    if (isAuthError(error.message)) {
+      // لا نخفي هذا بـ fallback صامت — نرمي الخطأ ليتعامل معه الكود المستدعي
+      // (مثلاً handleLogin يعرض رسالة واضحة بدل بيانات محلية قديمة)
+      throw new Error(error.message);
+    }
+    // خطأ شبكة فعلي — fallback مؤقت لعدم تعطيل الواجهة بالكامل
+    console.warn(`[offline-fallback] getAll('${storeName}') using local cache:`, error.message);
+    return localGetAll<T>(storeName);
   }
   return localGetAll<T>(storeName);
 };
 
 export const putItem = async <T>(storeName: string, item: T): Promise<void> => {
-  const client = getSupabaseWithUser();
-  if (client && SUPABASE_TABLES.has(storeName)) {
-    try {
-      const { error } = await client.from(storeName).upsert(item as any);
-      if (error) {
-        dbDiagnostics.hasErrors = true;
-        dbDiagnostics.lastErrorMessage = error.message;
-        dbDiagnostics.tableErrors[storeName] = error.message;
-        return localPutItem<T>(storeName, item);
-      }
+  if (SUPABASE_TABLES.has(storeName) && supabaseUrl) {
+    const { error } = await callDbProxy({ table: storeName, action: 'upsert', payload: item });
+    if (!error) {
       delete dbDiagnostics.tableErrors[storeName];
       if (Object.keys(dbDiagnostics.tableErrors).length === 0) {
         dbDiagnostics.hasErrors = false;
         dbDiagnostics.lastErrorMessage = null;
       }
-    } catch (e: any) {
-      dbDiagnostics.hasErrors = true;
-      dbDiagnostics.lastErrorMessage = e?.message || String(e);
-      dbDiagnostics.tableErrors[storeName] = e?.message || String(e);
-      return localPutItem<T>(storeName, item);
+      return;
     }
-  } else {
+    dbDiagnostics.hasErrors = true;
+    dbDiagnostics.lastErrorMessage = error.message;
+    dbDiagnostics.tableErrors[storeName] = error.message;
+    if (isAuthError(error.message)) {
+      throw new Error(error.message);
+    }
+    console.warn(`[offline-fallback] putItem('${storeName}') using local cache:`, error.message);
     return localPutItem<T>(storeName, item);
   }
+  return localPutItem<T>(storeName, item);
 };
 
 export const deleteItem = async (storeName: string, key: any): Promise<void> => {
-  const client = getSupabaseWithUser();
-  if (client && SUPABASE_TABLES.has(storeName)) {
-    try {
-      const idColumn = storeName === 'users' ? 'user' : 'id';
-      const { error } = await client.from(storeName).delete().eq(idColumn, key);
-      if (error) {
-        dbDiagnostics.hasErrors = true;
-        dbDiagnostics.lastErrorMessage = error.message;
-        dbDiagnostics.tableErrors[storeName] = error.message;
-        return localDeleteItem(storeName, key);
-      }
+  if (SUPABASE_TABLES.has(storeName) && supabaseUrl) {
+    const idColumn = storeName === 'users' ? 'user' : 'id';
+    const { error } = await callDbProxy({ table: storeName, action: 'delete', match: { [idColumn]: key } });
+    if (!error) {
       delete dbDiagnostics.tableErrors[storeName];
       if (Object.keys(dbDiagnostics.tableErrors).length === 0) {
         dbDiagnostics.hasErrors = false;
         dbDiagnostics.lastErrorMessage = null;
       }
-    } catch (e: any) {
-      dbDiagnostics.hasErrors = true;
-      dbDiagnostics.lastErrorMessage = e?.message || String(e);
-      dbDiagnostics.tableErrors[storeName] = e?.message || String(e);
-      return localDeleteItem(storeName, key);
+      return;
     }
-  } else {
+    dbDiagnostics.hasErrors = true;
+    dbDiagnostics.lastErrorMessage = error.message;
+    dbDiagnostics.tableErrors[storeName] = error.message;
+    if (isAuthError(error.message)) {
+      throw new Error(error.message);
+    }
+    console.warn(`[offline-fallback] deleteItem('${storeName}') using local cache:`, error.message);
     return localDeleteItem(storeName, key);
   }
+  return localDeleteItem(storeName, key);
+};
+
+/**
+ * تحديث حقول محددة في سجل موجود بدلاً من upsert.
+ * يُستخدم عندما نريد تعديل عمود واحد أو أكثر دون المساس بباقي الحقول،
+ * وبدون الحاجة لتحديد onConflict (مشكلة upsert على جدول users).
+ *
+ * @param storeName - اسم الجدول
+ * @param match     - شرط التحديد، مثلاً { user: 'ahmed' } أو { id: 5 }
+ * @param payload   - الحقول المراد تحديثها فقط، مثلاً { status: 'active' }
+ */
+export const updateItem = async (
+  storeName: string,
+  match: Record<string, any>,
+  payload: Record<string, any>
+): Promise<void> => {
+  if (SUPABASE_TABLES.has(storeName) && supabaseUrl) {
+    const { error } = await callDbProxy({
+      table: storeName,
+      action: 'update',
+      payload,
+      match,
+    });
+    if (!error) {
+      delete dbDiagnostics.tableErrors[storeName];
+      if (Object.keys(dbDiagnostics.tableErrors).length === 0) {
+        dbDiagnostics.hasErrors = false;
+        dbDiagnostics.lastErrorMessage = null;
+      }
+      return;
+    }
+    dbDiagnostics.hasErrors = true;
+    dbDiagnostics.lastErrorMessage = error.message;
+    dbDiagnostics.tableErrors[storeName] = error.message;
+    if (isAuthError(error.message)) throw new Error(error.message);
+    // لا يوجد fallback محلي مناسب لـ update — نرمي الخطأ بوضوح
+    throw new Error(error.message);
+  }
+  // ── IndexedDB mode (offline) ──
+  // نسحب السجل الموجود ثم ندمج التغييرات عليه
+  const db = await openDB();
+  const idKey = Object.keys(match)[0];
+  const idVal = match[idKey];
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readwrite');
+    const store = tx.objectStore(storeName);
+    const getReq = store.get(idVal);
+    getReq.onsuccess = () => {
+      const existing = getReq.result;
+      if (!existing) { reject(new Error(`updateItem: record not found in '${storeName}' for key '${idVal}'`)); return; }
+      const putReq = store.put({ ...existing, ...payload });
+      putReq.onsuccess = () => resolve();
+      putReq.onerror = () => reject(putReq.error);
+    };
+    getReq.onerror = () => reject(getReq.error);
+  });
+};
+
+// ═══════════════════════════════════════════════════════
+//  AUTH — عبر auth-login Edge Function (service_role)
+// ═══════════════════════════════════════════════════════
+export interface LoginResult {
+  ok: boolean;
+  error?: string;
+  pending?: boolean;
+  user?: Record<string, any>;
+  token?: string;
+}
+
+/**
+ * تسجيل الدخول الآمن — يستبدل المقارنة اليدوية القديمة بـ getAll('users').
+ * كل التحقق (username/password/status) يصير بالخادم عبر service_role،
+ * وعند النجاح نحصل على session token نخزنه ونستخدمه بكل طلب لاحق.
+ */
+/**
+ * تُستدعى عند فتح الصفحة (قبل أي getAll('users')) للتحقق من صلاحية
+ * session token المحفوظ بـ localStorage من جلسة سابقة عبر auth-verify
+ * Edge Function. لو التوكن منتهي أو غير صالح، نمسحه فوراً بدل ما نسيب
+ * التطبيق يحاول طلبات db-proxy فاشلة بصمت.
+ */
+export const restoreSessionViaEdge = async (): Promise<Record<string, any> | null> => {
+  const token = getSessionToken();
+  if (!token || !supabaseUrl || !supabaseAnonKey) return null;
+  try {
+    const res = await fetch(`${supabaseUrl}/functions/v1/auth-verify`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${supabaseAnonKey}`,
+        'apikey': supabaseAnonKey,
+        'x-session-token': token,
+      },
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json?.user) {
+      setSessionToken(null);
+      return null;
+    }
+    return json.user;
+  } catch {
+    setSessionToken(null);
+    return null;
+  }
+};
+
+/**
+ * تسجيل حساب جديد (pending) — لا يحتاج session token لأنه قبل تسجيل الدخول.
+ * كل التحقق (تكرار الاسم، صحة الدور) يصير بالخادم عبر service_role.
+ */
+export const registerViaEdge = async (
+  username: string,
+  password: string,
+  role: string
+): Promise<{ ok: boolean; error?: string }> => {
+  if (!supabaseUrl || !supabaseAnonKey) {
+    return { ok: false, error: 'Supabase غير مهيّأ بهذه البيئة' };
+  }
+  try {
+    const res = await fetch(`${supabaseUrl}/functions/v1/auth-register`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${supabaseAnonKey}`,
+        'apikey': supabaseAnonKey,
+      },
+      body: JSON.stringify({ username, password, role }),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) return { ok: false, error: json?.error || `HTTP ${res.status}` };
+    return { ok: true };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+};
+
+export const loginViaEdge = async (
+  username: string,
+  password: string,
+  rememberMe: boolean
+): Promise<LoginResult> => {
+  if (!supabaseUrl || !supabaseAnonKey) {
+    return { ok: false, error: 'Supabase غير مهيّأ بهذه البيئة' };
+  }
+  try {
+    const res = await fetch(`${supabaseUrl}/functions/v1/auth-login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${supabaseAnonKey}`,
+        'apikey': supabaseAnonKey,
+      },
+      body: JSON.stringify({ username, password, rememberMe }),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return { ok: false, error: json?.error || `HTTP ${res.status}`, pending: json?.pending };
+    }
+    setSessionToken(json.token);
+    return { ok: true, user: json.user, token: json.token };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+};
+
+/** تسجيل الخروج — يمسح الـ session token محلياً (والسيرفر يتجاهله تلقائياً بعد انتهاء صلاحيته) */
+export const logoutViaEdge = () => {
+  setSessionToken(null);
 };
 
 // ═══════════════════════════════════════════════════════
@@ -477,23 +691,30 @@ export const sendDiscordViaEdge = async (
 
 /**
  * تحقق من صلاحية المستخدم الحالي في قاعدة البيانات مباشرة
- * هذا يمنع تزوير الـ role من DevTools
+ * هذا يمنع تزوير الـ role من DevTools.
+ * ملاحظة: بعد التحديث الأمني، auth-login نفسها ترجّع role موثّق من الخادم
+ * عند تسجيل الدخول، وكل طلب لاحق عبر db-proxy يعاد فيه نفس التحقق
+ * (status === 'active') تلقائياً بالخادم. هذي الدالة تبقى متاحة لإعادة
+ * التحقق الصريح عند الحاجة (مثلاً بعد إجراء حساس).
  */
 export const verifyUserRoleFromDB = async (username: string): Promise<string | null> => {
-  if (!supabase) {
+  if (!supabaseUrl) {
     // IndexedDB mode — لا يوجد server, نقبل الـ client role
     const users = await localGetAll<{ user: string; role: string; status: string }>('users');
     const u = users.find(x => x.user === username);
     return u?.status === 'active' ? u.role : null;
   }
   try {
-    const { data, error } = await supabase
-      .from('users')
-      .select('role, status')
-      .eq('user', username)
-      .single();
-    if (error || !data || data.status !== 'active') return null;
-    return data.role as string;
+    const { data, error } = await callDbProxy({
+      table: 'users',
+      action: 'select',
+      select: 'role, status',
+      match: { user: username },
+    });
+    if (error || !data) return null;
+    const row = Array.isArray(data) ? data[0] : data;
+    if (!row || row.status !== 'active') return null;
+    return row.role as string;
   } catch {
     return null;
   }
@@ -789,3 +1010,4 @@ export const globalSearch = (
 
   return results.slice(0, 30);
 };
+
