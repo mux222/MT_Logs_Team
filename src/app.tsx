@@ -360,6 +360,7 @@ const clearSession = () => {
   sessionStorage.removeItem(SEC.CSRF_KEY);
   localStorage.removeItem(SEC.SESSION_KEY);
   localStorage.removeItem(SEC.REMEMBER_KEY);
+  logoutViaEdge();
 };
 
 const getSavedUsername = async (): Promise<string> => {
@@ -395,6 +396,7 @@ const uploadVideoToR2 = async (file: File, fileName: string): Promise<string> =>
   return data.url;
 };
 import { useState, useEffect, useMemo, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   PlusCircle, 
@@ -468,10 +470,11 @@ import {
 } from 'lucide-react';
 import { User, UserRole, Ticket, Ban, Message, BanEvidence, AuditLog, PersonalNote, InvestigationCase, EvidenceItem, CaseEvent, CaseStatus, RiskLevel, EvidenceCategory, AltProfile, YaraRule, PCCheckRecord } from './types';
 import {
-  getAll, putItem, deleteItem, supabase, dbDiagnostics, getSupabaseWithUser,
+  getAll, putItem, deleteItem, updateItem, supabase, dbDiagnostics, getSupabaseWithUser, getSessionToken,
   hashPasswordWithSalt, verifyPasswordWithSalt, legacyVerify,
   generateSalt, verifyUserRoleFromDB, validateFile, sendDiscordViaEdge,
-  calculateRiskAssessment, globalSearch, assertCryptoAvailable, type RiskAssessment, type SearchResult
+  calculateRiskAssessment, globalSearch, assertCryptoAvailable, type RiskAssessment, type SearchResult,
+  loginViaEdge, logoutViaEdge, restoreSessionViaEdge, registerViaEdge,
 } from './db';
 
 // ── Pre-WL Hack type ─────────────────────────────────────
@@ -603,6 +606,7 @@ export default function App() {
   const [typingUsers, setTypingUsers] = useState<{ user: string; ticketId: number | string }[]>([]);
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const realtimeChannelRef = useRef<any>(null);
+  const uiChannelRef = useRef<any>(null); // قناة UI events (typing, new_ticket)
 
   // Ban Form
   const [showBanForm, setShowBanForm] = useState(false);
@@ -630,75 +634,81 @@ export default function App() {
     setConfirmModal({ show: true, title, message, onConfirm });
   };
 
+  // ══════════════════════════════════════════════════════════════
+  //  fetchAllData — دالة مركزية لجلب جميع البيانات من قاعدة البيانات
+  //  تُستدعى في موضعين:
+  //  1) عند استعادة الجلسة تلقائياً (فتح الموقع من جديد)
+  //  2) مباشرة بعد نجاح تسجيل الدخول (handleLogin)
+  // ══════════════════════════════════════════════════════════════
+  const fetchAllData = async () => {
+    const u = await getAll<User>('users');
+    setUsers(u);
+    setTickets(await getAll<Ticket>('tickets'));
+    setBans(await getAll<Ban>('bans'));
+    setAuditLogs(await getAll<AuditLog>('audit_logs'));
+    setPersonalNotes(await getAll<PersonalNote>('personal_notes'));
+    setCases(await getAll<InvestigationCase>('cases'));
+    setEvidenceItems(await getAll<EvidenceItem>('evidence_items'));
+    setAltProfiles(await getAll<AltProfile>('alt_profiles'));
+    const rawPreWL = await getAll<any>('pre_wl_hacks');
+    setPreWLHacks(rawPreWL.map((raw: any) => ({
+      id: raw.id,
+      rawText: raw.raw_text || raw.rawText || '',
+      playerName: raw.player_name || raw.playerName || '',
+      license: raw.license || '',
+      license2: raw.license2 || '',
+      licenses: raw.licenses ? (typeof raw.licenses === 'string' ? JSON.parse(raw.licenses) : raw.licenses) : [raw.license, raw.license2].filter(Boolean),
+      steam: raw.steam || '',
+      steams: raw.steams ? (typeof raw.steams === 'string' ? JSON.parse(raw.steams) : raw.steams) : [raw.steam].filter(Boolean),
+      discord: raw.discord || '',
+      discords: raw.discords ? (typeof raw.discords === 'string' ? JSON.parse(raw.discords) : raw.discords) : [raw.discord].filter(Boolean),
+      xbl: raw.xbl || '',
+      liveId: raw.live_id || raw.liveId || '',
+      ip: raw.ip || '',
+      bannedFrom: raw.banned_from || raw.bannedFrom || '',
+      hackActive: raw.hack_active !== undefined ? (raw.hack_active ? 'yes' : 'no') : (raw.hackActive || 'no'),
+      imageBase64: raw.image_base64 || raw.imageBase64 || '',
+      createdBy: raw.created_by || raw.createdBy || '',
+      createdByRole: raw.created_by_role || raw.createdByRole || '',
+      createdAt: raw.created_at ? new Date(raw.created_at).getTime() : (raw.createdAt || Date.now()),
+      updatedBy: raw.updated_by || raw.updatedBy,
+      updatedByRole: raw.updated_by_role || raw.updatedByRole,
+      updatedAt: raw.updated_at ? new Date(raw.updated_at).getTime() : raw.updatedAt,
+      timeline: raw.timeline ? (typeof raw.timeline === 'string' ? JSON.parse(raw.timeline) : raw.timeline) : [],
+    } as PreWLHack)));
+    setYaraRules(await getAll<YaraRule>('yara_rules'));
+    setPcChecks(await getAll<PCCheckRecord>('pc_checks'));
+  };
+
   useEffect(() => {
     const initData = async () => {
       try {
-        const u = await getAll<User>('users');
-        if (u.length === 0) {
-          const salt = generateSalt();
-          const defaultHashedPass = await hashPasswordWithSalt('098', salt);
-          const defaultAdmin: User = { user: 'admin', pass: defaultHashedPass, role: UserRole.MANAGER, status: 'active' };
-          await putItem('users', defaultAdmin);
-          setUsers([defaultAdmin]);
+        // ✅ نتحقق من session token المحفوظ بالخادم أولاً — قبل أي getAll('users'),
+        // لأن db-proxy يرفض كل طلب بدون توكن صالح. هذا يستبدل الاعتماد القديم
+        // على فك تشفير الجلسة محلياً وحده (غير موثوق لأنه لا يثبت شي للخادم).
+        const restoredUser = await restoreSessionViaEdge();
+
+        if (restoredUser) {
+          setCurrentUser(restoredUser as User);
+          setActiveSec('home');
+          if (restoredUser.role !== UserRole.ADMIN) setTicketViewMode('all');
         } else {
-          setUsers(u);
-          // Auto-login from saved session (async AES-GCM decryption)
+          // لا جلسة صالحة — تأكد من مسح أي بقايا جلسة محلية قديمة،
+          // وعبّي اسم المستخدم المتذكَّر فقط لتسهيل تسجيل الدخول (بدون أي ثقة أمنية به)
           const session = await loadSession();
-          if (session?.valid) {
-            // تحقق من الـ role من DB مباشرة — يمنع تزوير الـ role عبر DevTools
-            const confirmedRole = await verifyUserRoleFromDB(session.user);
-            const savedUser = u.find(usr => usr.user === session.user);
-            if (savedUser && savedUser.status === 'active' && confirmedRole) {
-              const verifiedUser = { ...savedUser, role: confirmedRole as any };
-              setCurrentUser(verifiedUser);
-              setActiveSec('home');
-              if (verifiedUser.role !== UserRole.ADMIN) setTicketViewMode('all');
-            } else {
-              clearSession();
-            }
-          }
-          // Pre-fill remembered username
+          if (session?.valid) clearSession();
           const saved = await getSavedUsername();
           if (saved) {
             setAuthInputs(prev => ({ ...prev, user: saved }));
             setRememberMe(true);
           }
         }
-        setTickets(await getAll<Ticket>('tickets'));
-        setBans(await getAll<Ban>('bans'));
-        setAuditLogs(await getAll<AuditLog>('audit_logs'));
-        setPersonalNotes(await getAll<PersonalNote>('personal_notes'));
-        setCases(await getAll<InvestigationCase>('cases'));
-        setEvidenceItems(await getAll<EvidenceItem>('evidence_items'));
-        setAltProfiles(await getAll<AltProfile>('alt_profiles'));
-        const rawPreWL = await getAll<any>('pre_wl_hacks');
-        setPreWLHacks(rawPreWL.map((raw: any) => ({
-          id: raw.id,
-          rawText: raw.raw_text || raw.rawText || '',
-          playerName: raw.player_name || raw.playerName || '',
-          license: raw.license || '',
-          license2: raw.license2 || '',
-          licenses: raw.licenses ? (typeof raw.licenses === 'string' ? JSON.parse(raw.licenses) : raw.licenses) : [raw.license, raw.license2].filter(Boolean),
-          steam: raw.steam || '',
-          steams: raw.steams ? (typeof raw.steams === 'string' ? JSON.parse(raw.steams) : raw.steams) : [raw.steam].filter(Boolean),
-          discord: raw.discord || '',
-          discords: raw.discords ? (typeof raw.discords === 'string' ? JSON.parse(raw.discords) : raw.discords) : [raw.discord].filter(Boolean),
-          xbl: raw.xbl || '',
-          liveId: raw.live_id || raw.liveId || '',
-          ip: raw.ip || '',
-          bannedFrom: raw.banned_from || raw.bannedFrom || '',
-          hackActive: raw.hack_active !== undefined ? (raw.hack_active ? 'yes' : 'no') : (raw.hackActive || 'no'),
-          imageBase64: raw.image_base64 || raw.imageBase64 || '',
-          createdBy: raw.created_by || raw.createdBy || '',
-          createdByRole: raw.created_by_role || raw.createdByRole || '',
-          createdAt: raw.created_at ? new Date(raw.created_at).getTime() : (raw.createdAt || Date.now()),
-          updatedBy: raw.updated_by || raw.updatedBy,
-          updatedByRole: raw.updated_by_role || raw.updatedByRole,
-          updatedAt: raw.updated_at ? new Date(raw.updated_at).getTime() : raw.updatedAt,
-          timeline: raw.timeline ? (typeof raw.timeline === 'string' ? JSON.parse(raw.timeline) : raw.timeline) : [],
-        } as PreWLHack)));
-        setYaraRules(await getAll<YaraRule>('yara_rules'));
-        setPcChecks(await getAll<PCCheckRecord>('pc_checks'));
+
+        // ── تحميل بيانات الجداول — فقط لو فيه جلسة صالحة فعلياً ──
+        // (db-proxy يرفض أي طلب بدون session token، فلا فائدة من المحاولة بدونه)
+        if (restoredUser) {
+          await fetchAllData();
+        }
       } catch (e) {
         console.error(e);
       } finally {
@@ -711,224 +721,242 @@ export default function App() {
     initData();
   }, []);
 
-  // Supabase Realtime Synchronization
+  // ═══════════════════════════════════════════════════════
+  //  Realtime Synchronization — Frontend Broadcast (Production-Ready)
+  //
+  //  المشكلة الجذرية السابقة:
+  //    broadcastChange() كانت تُستدعى من Edge Function (serverless/stateless).
+  //    كل استدعاء يفتح WebSocket جديد، ينتظر SUBSCRIBED، ثم يُرسل.
+  //    في بيئة Edge Function المحدودة، هذا يفشل صامتاً أو يُقطع.
+  //
+  //  الحل النهائي:
+  //    broadcast يُرسل من الفرونت مباشرة بعد كل putItem/deleteItem.
+  //    الفرونت عنده WebSocket مفتوح دائماً → الإرسال فوري وموثوق.
+  //    self: false → المُرسِل لا يستقبل event لنفسه (state عنده محدّث مسبقاً).
+  //    باقي الـ clients يستقبلون event ويُعيدون الجلب من db-proxy.
+  //
+  //  Channel: 'db-changes' | Event: '{table}:{action}'
+  // ═══════════════════════════════════════════════════════
+
+  // ── استدعاء مباشر لـ db-proxy لـ pre_wl_hacks (insert/update صريح) ──
+  // السبب: upsert في pre_wl_hacks يفشل لأن Supabase لا يعرف conflict column
+  // الحل: نستخدم action:'insert' للإضافة و action:'update'+match للتعديل
+  const callPreWLProxy = async (
+    action: 'insert' | 'update',
+    payload: Record<string, any>,
+    matchId?: number
+  ): Promise<{ ok: boolean; error?: string; data?: any }> => {
+    const token = getSessionToken();
+    if (!token) return { ok: false, error: 'no session token' };
+    try {
+      const body: any = { table: 'pre_wl_hacks', action, payload };
+      if (action === 'update' && matchId !== undefined) {
+        body.match = { id: matchId };
+        // عند update: لا نُرسل id في payload
+        delete body.payload.id;
+      }
+      const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/db-proxy`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+          'apikey': import.meta.env.VITE_SUPABASE_ANON_KEY,
+          'x-session-token': token,
+        },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) return { ok: false, error: json?.error || `HTTP ${res.status}` };
+      // مهم: نمرر data للأمام — preWLSave يعتمد عليها لجلب id الحقيقي بعد الإنسرت
+      return { ok: true, data: json.data };
+    } catch (e: any) {
+      return { ok: false, error: e?.message || String(e) };
+    }
+  };
+
+  // ── broadcast مركزي من الفرونت — يُستدعى بعد كل عملية كتابة ──────────
+  const broadcastDbChange = async (table: string, action: 'insert' | 'update' | 'delete') => {
+    if (!realtimeChannelRef.current) return;
+    try {
+      await realtimeChannelRef.current.send({
+        type: 'broadcast',
+        event: `${table}:${action}`,
+        payload: { table, action, ts: new Date().toISOString() },
+      });
+    } catch (e) {
+      console.warn('[RT] broadcastDbChange failed (non-fatal):', e);
+    }
+  };
+
   useEffect(() => {
     if (!supabase) return;
 
-    const channel = supabase.channel('public_db_changes_sync');
-    realtimeChannelRef.current = channel;
+    // ── القناة الوحيدة لتحديثات قاعدة البيانات ──────────────────────────
+    // self: false → المُرسِل لا يستقبل الـ event لأن state عنده محدّث مسبقاً
+    const dbChannel = supabase.channel('db-changes', {
+      config: { broadcast: { self: false } },
+    });
+    realtimeChannelRef.current = dbChannel;
 
-    // Subscribe to users
-    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'users' }, (payload) => {
-      if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-        const newUser = payload.new as User;
-        setUsers((prev) => {
-          const index = prev.findIndex((u) => u.user === newUser.user);
-          if (index > -1) {
-            const next = [...prev];
-            next[index] = newUser;
-            return next;
-          }
-          return [...prev, newUser];
-        });
-      } else if (payload.eventType === 'DELETE') {
-        const oldUser = payload.old as { user: string };
-        setUsers((prev) => prev.filter((u) => u.user !== oldUser.user));
-      }
+    // ── users ──────────────────────────────────────────
+    dbChannel.on('broadcast', { event: 'users:insert' }, (payload) => {
+      getAll<User>('users').then(setUsers);
+    });
+    dbChannel.on('broadcast', { event: 'users:update' }, (payload) => {
+      getAll<User>('users').then(setUsers);
+    });
+    dbChannel.on('broadcast', { event: 'users:delete' }, (payload) => {
+      getAll<User>('users').then(setUsers);
     });
 
-    // Subscribe to tickets
-    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, (payload) => {
-      if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-        const newTicket = payload.new as Ticket;
-        setTickets((prev) => {
-          const index = prev.findIndex((t) => String(t.id) === String(newTicket.id));
-          if (index > -1) {
-            const next = [...prev];
-            next[index] = newTicket;
-            return next;
-          }
-          return [...prev, newTicket];
-        });
-      } else if (payload.eventType === 'DELETE') {
-        const oldTicket = payload.old as { id: string | number };
-        setTickets((prev) => prev.filter((t) => String(t.id) !== String(oldTicket.id)));
-      }
+    // ── tickets ────────────────────────────────────────
+    dbChannel.on('broadcast', { event: 'tickets:insert' }, (payload) => {
+      getAll<Ticket>('tickets').then(setTickets);
+    });
+    dbChannel.on('broadcast', { event: 'tickets:update' }, (payload) => {
+      getAll<Ticket>('tickets').then(setTickets);
+    });
+    dbChannel.on('broadcast', { event: 'tickets:delete' }, (payload) => {
+      getAll<Ticket>('tickets').then(setTickets);
     });
 
-    // Subscribe to bans
-    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'bans' }, (payload) => {
-      if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-        const newBan = payload.new as Ban;
-        setBans((prev) => {
-          const index = prev.findIndex((b) => String(b.id) === String(newBan.id));
-          if (index > -1) {
-            const next = [...prev];
-            next[index] = newBan;
-            return next;
-          }
-          return [...prev, newBan];
-        });
-      } else if (payload.eventType === 'DELETE') {
-        const oldBan = payload.old as { id: string | number };
-        setBans((prev) => prev.filter((b) => String(b.id) !== String(oldBan.id)));
-      }
+    // ── bans ───────────────────────────────────────────
+    dbChannel.on('broadcast', { event: 'bans:insert' }, (payload) => {
+      getAll<Ban>('bans').then(setBans);
+    });
+    dbChannel.on('broadcast', { event: 'bans:update' }, (payload) => {
+      getAll<Ban>('bans').then(setBans);
+    });
+    dbChannel.on('broadcast', { event: 'bans:delete' }, (payload) => {
+      getAll<Ban>('bans').then(setBans);
     });
 
-    // Subscribe to audit logs
-    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'audit_logs' }, (payload) => {
-      if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-        const newLog = payload.new as AuditLog;
-        setAuditLogs((prev) => {
-          const index = prev.findIndex((l) => String(l.id) === String(newLog.id));
-          if (index > -1) {
-            const next = [...prev];
-            next[index] = newLog;
-            return next;
-          }
-          return [...prev, newLog];
-        });
-      } else if (payload.eventType === 'DELETE') {
-        const oldLog = payload.old as { id: string | number };
-        setAuditLogs((prev) => prev.filter((l) => String(l.id) !== String(oldLog.id)));
-      }
+    // ── audit_logs ─────────────────────────────────────
+    dbChannel.on('broadcast', { event: 'audit_logs:insert' }, (payload) => {
+      getAll<AuditLog>('audit_logs').then(setAuditLogs);
+    });
+    dbChannel.on('broadcast', { event: 'audit_logs:update' }, (payload) => {
+      getAll<AuditLog>('audit_logs').then(setAuditLogs);
+    });
+    dbChannel.on('broadcast', { event: 'audit_logs:delete' }, (payload) => {
+      getAll<AuditLog>('audit_logs').then(setAuditLogs);
     });
 
-    // Subscribe to personal notes
-    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'personal_notes' }, (payload) => {
-      if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-        const newNote = payload.new as PersonalNote;
-        setPersonalNotes((prev) => {
-          const index = prev.findIndex((n) => String(n.id) === String(newNote.id));
-          if (index > -1) {
-            const next = [...prev];
-            next[index] = newNote;
-            return next;
-          }
-          return [...prev, newNote];
-        });
-      } else if (payload.eventType === 'DELETE') {
-        const oldNote = payload.old as { id: string | number };
-        setPersonalNotes((prev) => prev.filter((n) => String(n.id) !== String(oldNote.id)));
-      }
+    // ── personal_notes ─────────────────────────────────
+    dbChannel.on('broadcast', { event: 'personal_notes:insert' }, (payload) => {
+      getAll<PersonalNote>('personal_notes').then(setPersonalNotes);
+    });
+    dbChannel.on('broadcast', { event: 'personal_notes:update' }, (payload) => {
+      getAll<PersonalNote>('personal_notes').then(setPersonalNotes);
+    });
+    dbChannel.on('broadcast', { event: 'personal_notes:delete' }, (payload) => {
+      getAll<PersonalNote>('personal_notes').then(setPersonalNotes);
     });
 
-    // Subscribe to investigation cases
-    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'cases' }, (payload) => {
-      if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-        const newCase = payload.new as InvestigationCase;
-        setCases((prev) => {
-          const index = prev.findIndex((c) => String(c.id) === String(newCase.id));
-          if (index > -1) {
-            const next = [...prev];
-            next[index] = newCase;
-            return next;
-          }
-          return [newCase, ...prev];
-        });
-      } else if (payload.eventType === 'DELETE') {
-        const oldCase = payload.old as { id: string | number };
-        setCases((prev) => prev.filter((c) => String(c.id) !== String(oldCase.id)));
-      }
+    // ── cases ──────────────────────────────────────────
+    dbChannel.on('broadcast', { event: 'cases:insert' }, (payload) => {
+      getAll<InvestigationCase>('cases').then(setCases);
+    });
+    dbChannel.on('broadcast', { event: 'cases:update' }, (payload) => {
+      getAll<InvestigationCase>('cases').then(setCases);
+    });
+    dbChannel.on('broadcast', { event: 'cases:delete' }, (payload) => {
+      getAll<InvestigationCase>('cases').then(setCases);
     });
 
-    // Subscribe to evidence items
-    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'evidence_items' }, (payload) => {
-      if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-        const newEv = payload.new as EvidenceItem;
-        setEvidenceItems((prev) => {
-          const index = prev.findIndex((e) => String(e.id) === String(newEv.id));
-          if (index > -1) {
-            const next = [...prev];
-            next[index] = newEv;
-            return next;
-          }
-          return [newEv, ...prev];
-        });
-      } else if (payload.eventType === 'DELETE') {
-        const oldEv = payload.old as { id: string | number };
-        setEvidenceItems((prev) => prev.filter((e) => String(e.id) !== String(oldEv.id)));
-      }
+    // ── evidence_items ─────────────────────────────────
+    dbChannel.on('broadcast', { event: 'evidence_items:insert' }, (payload) => {
+      getAll<EvidenceItem>('evidence_items').then(setEvidenceItems);
+    });
+    dbChannel.on('broadcast', { event: 'evidence_items:update' }, (payload) => {
+      getAll<EvidenceItem>('evidence_items').then(setEvidenceItems);
+    });
+    dbChannel.on('broadcast', { event: 'evidence_items:delete' }, (payload) => {
+      getAll<EvidenceItem>('evidence_items').then(setEvidenceItems);
     });
 
-    // Subscribe to alt profiles
-    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'pre_wl_hacks' }, (payload) => {
-      if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-        const raw = payload.new as any;
-        const h: PreWLHack = {
-          id: raw.id,
-          rawText: raw.raw_text || '',
-          playerName: raw.player_name || '',
-          license: raw.license || '',
-          license2: raw.license2 || '',
-          licenses: raw.licenses ? (typeof raw.licenses === 'string' ? JSON.parse(raw.licenses) : raw.licenses) : [raw.license, raw.license2].filter(Boolean),
-          steam: raw.steam || '',
-          steams: raw.steams ? (typeof raw.steams === 'string' ? JSON.parse(raw.steams) : raw.steams) : [raw.steam].filter(Boolean),
-          discord: raw.discord || '',
-          discords: raw.discords ? (typeof raw.discords === 'string' ? JSON.parse(raw.discords) : raw.discords) : [raw.discord].filter(Boolean),
-          xbl: raw.xbl || '',
-          liveId: raw.live_id || '',
-          ip: raw.ip || '',
-          bannedFrom: raw.banned_from || '',
-          hackActive: raw.hack_active ? 'yes' : 'no',
-          imageBase64: raw.image_base64 || '',
-          createdBy: raw.created_by || '',
-          createdByRole: raw.created_by_role || '',
-          createdAt: raw.created_at ? new Date(raw.created_at).getTime() : Date.now(),
-          updatedBy: raw.updated_by,
-          updatedByRole: raw.updated_by_role,
-          updatedAt: raw.updated_at ? new Date(raw.updated_at).getTime() : undefined,
-          timeline: raw.timeline ? (typeof raw.timeline === 'string' ? JSON.parse(raw.timeline) : raw.timeline) : [],
-        };
-        setPreWLHacks(prev => { const i = prev.findIndex(x => String(x.id) === String(h.id)); return i >= 0 ? prev.map(x => String(x.id) === String(h.id) ? h : x) : [h, ...prev]; });
-      } else { setPreWLHacks(prev => prev.filter(x => String(x.id) !== String((payload.old as any).id))); }
+    // ── alt_profiles ───────────────────────────────────
+    dbChannel.on('broadcast', { event: 'alt_profiles:insert' }, (payload) => {
+      getAll<AltProfile>('alt_profiles').then(setAltProfiles);
     });
-    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'alt_profiles' }, (payload) => {
-      if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-        const p = payload.new as AltProfile;
-        setAltProfiles(prev => {
-          const i = prev.findIndex(x => String(x.id) === String(p.id));
-          if (i > -1) { const n = [...prev]; n[i] = p; return n; }
-          return [p, ...prev];
-        });
-      } else if (payload.eventType === 'DELETE') {
-        const old = payload.old as { id: string | number };
-        setAltProfiles(prev => prev.filter(x => String(x.id) !== String(old.id)));
-      }
+    dbChannel.on('broadcast', { event: 'alt_profiles:update' }, (payload) => {
+      getAll<AltProfile>('alt_profiles').then(setAltProfiles);
+    });
+    dbChannel.on('broadcast', { event: 'alt_profiles:delete' }, (payload) => {
+      getAll<AltProfile>('alt_profiles').then(setAltProfiles);
     });
 
-    // Subscribe to yara rules
-    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'yara_rules' }, (payload) => {
-      if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-        const r = payload.new as YaraRule;
-        setYaraRules(prev => {
-          const i = prev.findIndex(x => String(x.id) === String(r.id));
-          if (i > -1) { const n = [...prev]; n[i] = r; return n; }
-          return [r, ...prev];
-        });
-      } else if (payload.eventType === 'DELETE') {
-        const old = payload.old as { id: string | number };
-        setYaraRules(prev => prev.filter(x => String(x.id) !== String(old.id)));
-      }
+    // ── pre_wl_hacks ───────────────────────────────────
+    const reloadPreWLHacks = async () => {
+      const rawPreWL = await getAll<any>('pre_wl_hacks');
+      setPreWLHacks(rawPreWL.map((raw: any) => ({
+        id: raw.id,
+        rawText: raw.raw_text || raw.rawText || '',
+        playerName: raw.player_name || raw.playerName || '',
+        license: raw.license || '',
+        license2: raw.license2 || '',
+        licenses: raw.licenses ? (typeof raw.licenses === 'string' ? JSON.parse(raw.licenses) : raw.licenses) : [raw.license, raw.license2].filter(Boolean),
+        steam: raw.steam || '',
+        steams: raw.steams ? (typeof raw.steams === 'string' ? JSON.parse(raw.steams) : raw.steams) : [raw.steam].filter(Boolean),
+        discord: raw.discord || '',
+        discords: raw.discords ? (typeof raw.discords === 'string' ? JSON.parse(raw.discords) : raw.discords) : [raw.discord].filter(Boolean),
+        xbl: raw.xbl || '',
+        liveId: raw.live_id || raw.liveId || '',
+        ip: raw.ip || '',
+        bannedFrom: raw.banned_from || raw.bannedFrom || '',
+        hackActive: raw.hack_active !== undefined ? (raw.hack_active ? 'yes' : 'no') : (raw.hackActive || 'no'),
+        imageBase64: raw.image_base64 || raw.imageBase64 || '',
+        createdBy: raw.created_by || raw.createdBy || '',
+        createdByRole: raw.created_by_role || raw.createdByRole || '',
+        createdAt: raw.created_at ? new Date(raw.created_at).getTime() : (raw.createdAt || Date.now()),
+        updatedBy: raw.updated_by || raw.updatedBy,
+        updatedByRole: raw.updated_by_role || raw.updatedByRole,
+        updatedAt: raw.updated_at ? new Date(raw.updated_at).getTime() : raw.updatedAt,
+        timeline: raw.timeline ? (typeof raw.timeline === 'string' ? JSON.parse(raw.timeline) : raw.timeline) : [],
+      } as PreWLHack)));
+    };
+    dbChannel.on('broadcast', { event: 'pre_wl_hacks:insert' }, (payload) => {
+      reloadPreWLHacks();
+    });
+    dbChannel.on('broadcast', { event: 'pre_wl_hacks:update' }, (payload) => {
+      reloadPreWLHacks();
+    });
+    dbChannel.on('broadcast', { event: 'pre_wl_hacks:delete' }, (payload) => {
+      reloadPreWLHacks();
     });
 
-    // Subscribe to PC-CHECK records
-    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'pc_checks' }, (payload) => {
-      if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-        const r = payload.new as PCCheckRecord;
-        setPcChecks(prev => {
-          const i = prev.findIndex(x => String(x.id) === String(r.id));
-          if (i > -1) { const n = [...prev]; n[i] = r; return n; }
-          return [r, ...prev];
-        });
-      } else if (payload.eventType === 'DELETE') {
-        const old = payload.old as { id: string | number };
-        setPcChecks(prev => prev.filter(x => String(x.id) !== String(old.id)));
-      }
+    // ── yara_rules ─────────────────────────────────────
+    dbChannel.on('broadcast', { event: 'yara_rules:insert' }, (payload) => {
+      getAll<YaraRule>('yara_rules').then(setYaraRules);
+    });
+    dbChannel.on('broadcast', { event: 'yara_rules:update' }, (payload) => {
+      getAll<YaraRule>('yara_rules').then(setYaraRules);
+    });
+    dbChannel.on('broadcast', { event: 'yara_rules:delete' }, (payload) => {
+      getAll<YaraRule>('yara_rules').then(setYaraRules);
     });
 
-    // Listen for typing indicators
-    channel.on('broadcast', { event: 'typing' }, (payload) => {
+    // ── pc_checks ──────────────────────────────────────
+    dbChannel.on('broadcast', { event: 'pc_checks:insert' }, (payload) => {
+      getAll<PCCheckRecord>('pc_checks').then(setPcChecks);
+    });
+    dbChannel.on('broadcast', { event: 'pc_checks:update' }, (payload) => {
+      getAll<PCCheckRecord>('pc_checks').then(setPcChecks);
+    });
+    dbChannel.on('broadcast', { event: 'pc_checks:delete' }, (payload) => {
+      getAll<PCCheckRecord>('pc_checks').then(setPcChecks);
+    });
+
+    dbChannel.subscribe((status) => {
+    });
+
+    // ── القناة 2: public_db_changes_sync (Typing + Notifications فقط) ──────
+    // هذه القناة الثانية مخصصة فقط للـ UX events (typing, new_ticket)
+    // وليس لتحديثات قاعدة البيانات
+    const uiChannel = supabase.channel('public_db_changes_sync');
+    uiChannelRef.current = uiChannel;
+
+    uiChannel.on('broadcast', { event: 'typing' }, (payload) => {
       const { user, ticketId } = payload.payload;
       setTypingUsers(prev => {
         const filtered = prev.filter(t => !(t.user === user && String(t.ticketId) === String(ticketId)));
@@ -939,18 +967,19 @@ export default function App() {
       }, 3000);
     });
 
-    // Listen for new ticket notifications
-    channel.on('broadcast', { event: 'new_ticket' }, (payload) => {
+    uiChannel.on('broadcast', { event: 'new_ticket' }, (payload) => {
       const { subject, creator, ticketId } = payload.payload;
       const notif = { id: Date.now(), msg: `🎫 تذكرة جديدة من ${creator}، الرجاء الاطلاع عليها`, ticketId };
       setNotifications(prev => [...prev, notif]);
       setTimeout(() => setNotifications(prev => prev.filter(n => n.id !== notif.id)), 6000);
     });
 
-    channel.subscribe();
+    uiChannel.subscribe();
 
     return () => {
-      supabase?.removeChannel(channel);
+      supabase?.removeChannel(dbChannel);
+      supabase?.removeChannel(uiChannel);
+      uiChannelRef.current = null;
     };
   }, []);
 
@@ -1031,84 +1060,43 @@ export default function App() {
     setAuthFeedback(null);
 
     try {
-      // ✅ جلب أحدث البيانات — مع fallback على الـ state لو DB فشلت
-      let allUsers: User[] = users;
-      try {
-        const freshFromDB = await getAll<User>('users');
-        if (freshFromDB && freshFromDB.length > 0) {
-          allUsers = freshFromDB;
-          setUsers(freshFromDB);
+      // ✅ تسجيل الدخول الآمن — التحقق الكامل (username/password/status/role)
+      // يصير بالخادم عبر service_role (auth-login Edge Function)، بعيداً
+      // تماماً عن anon key و RLS. لا حاجة بعد الآن لجلب كل المستخدمين للمتصفح.
+      const result = await loginViaEdge(authInputs.user.trim(), authInputs.pass, rememberMe);
+
+      if (!result.ok || !result.user) {
+        if (result.pending) {
+          setAuthFeedback({ type: 'success', msg: '⏳ الرجاء الانتظار لحين قبول طلبك من المسؤولين' });
+          return;
         }
-      } catch (dbErr) {
-        console.warn('DB fetch failed, using state users:', dbErr);
-      }
-
-      const candidate = allUsers.find(u => u.user.trim() === authInputs.user.trim());
-      let authenticated = false;
-      let finalUser: User | undefined = candidate;
-
-      if (candidate) {
-        const storedPass = candidate.pass;
-        const isPbkdf2 = storedPass.startsWith('pbkdf2$');
-
-        if (isPbkdf2) {
-          // كلمة مرور PBKDF2 حديثة — التحقق الصحيح
-          authenticated = await verifyPasswordWithSalt(authInputs.pass, storedPass);
-        } else {
-          // legacy (SHA-256 قديم أو plain-text) — نتحقق ثم نرقّي فوراً
-          authenticated = await legacyVerify(authInputs.pass, storedPass);
-          if (authenticated) {
-            try {
-              const newSalt = generateSalt();
-              const newHash = await hashPasswordWithSalt(authInputs.pass, newSalt);
-              const upgraded = { ...candidate, pass: newHash };
-              await putItem('users', upgraded);
-              finalUser = upgraded;
-              setUsers(prev => prev.map(u => u.user === candidate.user ? upgraded : u));
-            } catch {
-              finalUser = candidate;
-            }
-          }
-        }
-      }
-
-      if (!authenticated || !finalUser) {
         recordFailedAttempt();
         const newRl = checkRateLimit();
         setRateLimitState(newRl);
         if (newRl.blocked) {
           setAuthFeedback({ type: 'error', msg: `🔒 تم تجميد الحساب لمدة 15 دقيقة بسبب المحاولات المتعددة` });
         } else {
-          setAuthFeedback({ type: 'error', msg: `❌ اسم المستخدم أو كلمة المرور غير صحيحة • ${newRl.remaining} محاولة متبقية` });
+          setAuthFeedback({ type: 'error', msg: `❌ ${result.error || 'اسم المستخدم أو كلمة المرور غير صحيحة'} • ${newRl.remaining} محاولة متبقية` });
         }
         return;
       }
 
-      if (finalUser.status === 'pending') {
-        setAuthFeedback({ type: 'success', msg: '⏳ الرجاء الانتظار لحين قبول طلبك من المسؤولين' });
-        return;
-      }
-
-      if (finalUser.status !== 'active') {
-        setAuthFeedback({ type: 'error', msg: '🚫 هذا الحساب موقوف، تواصل مع المسؤولين' });
-        return;
-      }
-
-      // ✅ دخول ناجح — نتحقق من الـ role من DB قبل حفظ الجلسة
-      const confirmedRole = await verifyUserRoleFromDB(finalUser.user);
-      if (!confirmedRole) {
-        setAuthFeedback({ type: 'error', msg: '🚫 لم يتمكن النظام من التحقق من صلاحياتك، تواصل مع المسؤولين' });
-        return;
-      }
-      const verifiedFinalUser = { ...finalUser, role: confirmedRole as any };
+      const verifiedFinalUser = result.user as User;
       clearAttempts();
       await saveSession(verifiedFinalUser.user, verifiedFinalUser.role, rememberMe);
       setCurrentUser(verifiedFinalUser);
       setAuthInputs({ user: '', pass: '', role: UserRole.LOGS });
       setAuthFeedback(null);
       setActiveSec('home');
-      if (finalUser.role !== UserRole.ADMIN) {
+      if (verifiedFinalUser.role !== UserRole.ADMIN) {
         setTicketViewMode('all');
+      }
+      // ✅ جلب جميع البيانات مباشرة بعد نجاح تسجيل الدخول —
+      // session token موجود الآن فـ db-proxy سيقبل الطلبات
+      try {
+        await fetchAllData();
+      } catch (fetchErr) {
+        console.error('[Login] fetchAllData error:', fetchErr);
       }
 
     } catch (unexpectedErr) {
@@ -1134,33 +1122,47 @@ export default function App() {
       return;
     }
 
-    // تحقق من تكرار الاسم — نجيب من DB مباشرة
-    let existingUsers: User[] = users;
-    try {
-      const fresh = await getAll<User>('users');
-      if (fresh && fresh.length > 0) existingUsers = fresh;
-    } catch {}
-
-    if (existingUsers.find(u => u.user.trim() === authInputs.user.trim())) {
-      setAuthFeedback({ type: 'error', msg: '❌ اسم المستخدم موجود بالفعل، اختر اسماً آخر' });
-      return;
-    }
-
     setAuthFeedback(null);
 
     try {
-      const newSalt = generateSalt();
-      const hashedPass = await hashPasswordWithSalt(authInputs.pass.trim(), newSalt);
-      const newUser: User = {
-        user: authInputs.user.trim(),
-        pass: hashedPass,
-        role: authInputs.role,
-        status: 'pending'
-      };
+      // ✅ التحقق من تكرار الاسم + الإنشاء يصير بالكامل بالخادم عبر service_role
+      // (auth-register Edge Function) — لا حاجة لـ getAll/putItem هنا، لأن
+      // المستخدم أصلاً غير مسجل دخول ولا يملك session token بعد.
+      const result = await registerViaEdge(authInputs.user.trim(), authInputs.pass.trim(), authInputs.role);
 
-      await putItem('users', newUser);
-      setUsers(prev => [...prev, newUser]);
+      if (!result.ok) {
+        setAuthFeedback({ type: 'error', msg: `❌ ${result.error || 'حدث خطأ أثناء التسجيل'}` });
+        return;
+      }
+
       setRegisterSuccess(true);
+
+      // ── إشعار الأدمن بمستخدم جديد ينتظر الموافقة ──
+      // نفتح channel مؤقت على 'db-changes' — الأدمن يستمع على نفس القناة
+      if (supabase) {
+        const notifyChannel = supabase.channel('db-changes');
+        let sent = false;
+        const cleanup = () => { if (!sent) { sent = true; supabase?.removeChannel(notifyChannel); } };
+        const timeoutId = setTimeout(cleanup, 8000); // cleanup بعد 8 ثوانٍ على أقصى تقدير
+        notifyChannel.subscribe((status) => {
+          if (status === 'SUBSCRIBED' && !sent) {
+            sent = true;
+            clearTimeout(timeoutId);
+            notifyChannel.send({
+              type: 'broadcast',
+              event: 'users:insert',
+              payload: { table: 'users', action: 'insert', ts: new Date().toISOString() },
+            }).then(() => {
+              supabase?.removeChannel(notifyChannel);
+            }).catch(() => {
+              supabase?.removeChannel(notifyChannel);
+            });
+          } else if (status === 'CHANNEL_ERROR' || status === 'CLOSED') {
+            clearTimeout(timeoutId);
+            supabase?.removeChannel(notifyChannel);
+          }
+        });
+      }
 
       setTimeout(() => {
         setRegisterSuccess(false);
@@ -1192,6 +1194,7 @@ export default function App() {
     }));
     const updatedMe = updatedUsers.find(u => u.user === (newUser || currentUser.user))!;
     await putItem('users', updatedMe);
+    broadcastDbChange('users', 'update');
     setUsers(updatedUsers);
     setCurrentUser(updatedMe);
     alert("تم التحديث!");
@@ -1205,10 +1208,19 @@ export default function App() {
       setToast({ show: true, msg: '🚫 ليس لديك صلاحية لتنفيذ هذا الإجراء' });
       return;
     }
-    const updated = users.map(u => u.user === name ? { ...u, status: 'active' as const } : u);
-    setUsers(updated);
-    await putItem('users', updated.find(u => u.user === name)!);
-    await addAuditLog('Approve User', `Approved user account: ${name}`);
+    try {
+      // ✅ إصلاح: نستخدم updateItem (action:'update') بدل putItem (action:'upsert')
+      // upsert على جدول users يفشل صامتاً لأن Supabase لا يعرف onConflict
+      // لعمود 'user' الذي هو المفتاح الأساسي وليس 'id'.
+      // update مع match صريح يضمن تحديث السجل الموجود مباشرة.
+      await updateItem('users', { user: name }, { status: 'active' });
+      const updated = users.map(u => u.user === name ? { ...u, status: 'active' as const } : u);
+      setUsers(updated);
+      broadcastDbChange('users', 'update');
+      await addAuditLog('Approve User', `Approved user account: ${name}`);
+    } catch (e: any) {
+      setToast({ show: true, msg: `❌ فشل قبول الحساب: ${e?.message || 'خطأ غير معروف'}` });
+    }
   };
 
   const deleteUser = async (name: string) => {
@@ -1225,6 +1237,7 @@ export default function App() {
         const updated = users.filter(u => u.user !== name);
         setUsers(updated);
         await deleteItem('users', name);
+        broadcastDbChange('users', 'delete');
         if (currentUser?.user === name) setCurrentUser(null);
         await addAuditLog('Delete User', `Deleted user account: ${name}`);
       }
@@ -1310,18 +1323,19 @@ const sendTicket = async () => {
     }
 
     await putItem('tickets', newTicket);
+    broadcastDbChange('tickets', 'insert');
     setTickets([newTicket, ...tickets]);
 
     // إشعار الفريق بالتذكرة الجديدة عبر Broadcast
-    if (realtimeChannelRef.current) {
+    if (uiChannelRef.current) {
       try {
-        await realtimeChannelRef.current.send({
+        await uiChannelRef.current.send({
           type: 'broadcast',
           event: 'new_ticket',
           payload: { subject: newTicket.subject, creator: currentUser.user, ticketId: newTicket.id }
         });
       } catch (e) {
-        console.error('broadcast error:', e);
+        console.error('broadcast new_ticket error:', e);
       }
     }
 
@@ -1404,6 +1418,7 @@ const sendReply = async () => {
     newTickets[tIdx] = ticket;
     setTickets(newTickets);
     await putItem('tickets', ticket);
+    broadcastDbChange('tickets', 'update');
     setReplyInput('');
     setReplyFile(null);
   };
@@ -1446,6 +1461,7 @@ const sendReply = async () => {
       newTickets[tIdx] = ticket;
       setTickets(newTickets);
       await putItem('tickets', ticket);
+      broadcastDbChange('tickets', 'update');
       await addAuditLog(`${status === 'working' ? 'Claim' : 'Close'} Ticket`, `Subject: ${ticket.subject} | ${detailMsg}`);
     };
 
@@ -1557,6 +1573,7 @@ const addBan = async () => {
           const removedMedia = oldEvidence.filter(o => !evidence.some(e => e.url === o.url));
 
           await putItem('bans', newBan);
+          broadcastDbChange('bans', 'update');
           setBans(bans.map(b => b.id === editingBanId ? newBan : b));
 
           const hasTextChanges = editDiff.length > 0;
@@ -1629,6 +1646,7 @@ const addBan = async () => {
         createdAt: Date.now()
       };
       await putItem('bans', newBan);
+      broadcastDbChange('bans', 'insert');
       setBans([newBan, ...bans]);
       await addAuditLog('Add Ban', `Added new ban record for Discord ID: ${banForm.discordId}`, {
         discordId: newBan.discordId,
@@ -1659,6 +1677,7 @@ const addBan = async () => {
         const newEv = ban.evidence.filter((_, i) => i !== index);
         const updated = { ...ban, evidence: newEv };
         await putItem('bans', updated);
+        broadcastDbChange('bans', 'update');
         setBans(bans.map(b => b.id === banId ? updated : b));
         const itemType = removedItem?.type === 'video' ? 'video' : 'image';
         const removeAction = itemType === 'video' ? 'Remove Video Evidence' : 'Remove Image Evidence';
@@ -1696,6 +1715,7 @@ const addBan = async () => {
         // جلب بيانات الباند قبل الحذف عشان نرسلها لـ Discord
         const banRecord = bans.find(b => b.id === id);
         await deleteItem('bans', id);
+        broadcastDbChange('bans', 'delete');
         setBans(bans.filter(b => b.id !== id));
         const deletedDetails = banRecord
           ? `Deleted ban — Discord ID: ${banRecord.discordId} | Type: ${banRecord.type} | Reason: ${banRecord.reason}`
@@ -1709,6 +1729,7 @@ const addBan = async () => {
           timestamp: Date.now()
         };
         await putItem('audit_logs', newLog);
+        broadcastDbChange('audit_logs', 'insert');
         setAuditLogs(prev => [newLog, ...prev]);
         sendDiscordLogsNotification(
           'Delete Ban',
@@ -1856,6 +1877,7 @@ ${renderIdentifiers(ban.identifiers)}
     };
 
     await putItem('personal_notes', newNote);
+    broadcastDbChange('personal_notes', editingNoteId ? 'update' : 'insert');
     if (editingNoteId) {
       setPersonalNotes(personalNotes.map(n => n.id === editingNoteId ? newNote : n));
     } else {
@@ -1876,6 +1898,7 @@ ${renderIdentifiers(ban.identifiers)}
 
   const deleteNote = async (id: number) => {
     await deleteItem('personal_notes', id);
+    broadcastDbChange('personal_notes', 'delete');
     setPersonalNotes(personalNotes.filter(n => n.id !== id));
     if (editingNoteId === id) {
       setEditingNoteId(null);
@@ -1888,6 +1911,7 @@ ${renderIdentifiers(ban.identifiers)}
     if (!note) return;
     const updated = { ...note, isPinned: !note.isPinned, updatedAt: Date.now() };
     await putItem('personal_notes', updated);
+    broadcastDbChange('personal_notes', 'update');
     setPersonalNotes(personalNotes.map(n => n.id === id ? updated : n));
   };
 
@@ -1997,6 +2021,7 @@ ${renderIdentifiers(ban.identifiers)}
       updatedAt: now,
     };
     await putItem('alt_profiles', profile);
+    broadcastDbChange('alt_profiles', 'update');
     setAltProfiles(prev => {
       const i = prev.findIndex(p => p.id === profile.id);
       if (i > -1) { const n = [...prev]; n[i] = profile; return n; }
@@ -2030,6 +2055,7 @@ ${renderIdentifiers(ban.identifiers)}
     }
     const p = altProfiles.find(x => x.id === id);
     await deleteItem('alt_profiles', id);
+    broadcastDbChange('alt_profiles', 'delete');
     setAltProfiles(prev => prev.filter(x => x.id !== id));
     await addAuditLog('IR: Delete Profile', `Deleted alt profile — Primary: ${p?.primaryId} | Linked: [${p?.linkedIds?.join(', ')}]`);
     setToast({ show: true, msg: '🗑️ تم حذف الملف' });
@@ -2052,6 +2078,7 @@ ${renderIdentifiers(ban.identifiers)}
     }
     const updated = { ...p, linkedIds: [...p.linkedIds, newId.trim()], updatedAt: Date.now() };
     await putItem('alt_profiles', updated);
+    broadcastDbChange('alt_profiles', 'update');
     setAltProfiles(prev => prev.map(x => x.id === profileId ? updated : x));
     await addAuditLog('IR: Add Linked ID', `Added linked ID ${newId.trim()} to profile Primary: ${p.primaryId}`);
   };
@@ -2066,6 +2093,7 @@ ${renderIdentifiers(ban.identifiers)}
     }
     const updated = { ...p, linkedIds: p.linkedIds.filter(id => id !== removeId), updatedAt: Date.now() };
     await putItem('alt_profiles', updated);
+    broadcastDbChange('alt_profiles', 'update');
     setAltProfiles(prev => prev.map(x => x.id === profileId ? updated : x));
     await addAuditLog('IR: Remove Linked ID', `Removed linked ID ${removeId} from profile Primary: ${p.primaryId}`);
   };
@@ -2105,6 +2133,7 @@ ${renderIdentifiers(ban.identifiers)}
       updatedAt: now,
     };
     await putItem('yara_rules', rule);
+    broadcastDbChange('yara_rules', 'insert');
     setYaraRules(prev => {
       const i = prev.findIndex(r => r.id === rule.id);
       if (i > -1) { const n = [...prev]; n[i] = rule; return n; }
@@ -2130,6 +2159,7 @@ ${renderIdentifiers(ban.identifiers)}
     }
     const r = yaraRules.find(x => x.id === id);
     await deleteItem('yara_rules', id);
+    broadcastDbChange('yara_rules', 'delete');
     setYaraRules(prev => prev.filter(x => x.id !== id));
     await addAuditLog('YARA: Delete Rule', `Deleted YARA rule: "${r?.name}"`);
     setToast({ show: true, msg: '🗑️ تم حذف القاعدة' });
@@ -2177,6 +2207,7 @@ ${renderIdentifiers(ban.identifiers)}
       updatedAt: now,
     };
     await putItem('pc_checks', record);
+    broadcastDbChange('pc_checks', 'insert');
     setPcChecks(prev => {
       const i = prev.findIndex(c => c.id === record.id);
       if (i > -1) { const n = [...prev]; n[i] = record; return n; }
@@ -2206,6 +2237,7 @@ ${renderIdentifiers(ban.identifiers)}
       async () => {
         const r = pcChecks.find(c => c.id === id);
         await deleteItem('pc_checks', id);
+        broadcastDbChange('pc_checks', 'delete');
         setPcChecks(prev => prev.filter(c => c.id !== id));
         await addAuditLog('PC-CHECK: Delete Record', `Deleted PC-CHECK record for player "${r?.player}"`);
         setToast({ show: true, msg: '🗑️ تم حذف السجل' });
@@ -2243,6 +2275,7 @@ ${renderIdentifiers(ban.identifiers)}
       timestamp: Date.now()
     };
     await putItem('audit_logs', newLog);
+    broadcastDbChange('audit_logs', 'insert');
     setAuditLogs(prev => [newLog, ...prev]);
     // إرسال إشعار Discord عبر Webhook الـ Logs
     sendDiscordLogsNotification(action, details, currentUser.user, banData).catch(() => {});
@@ -2412,16 +2445,17 @@ ${renderIdentifiers(ban.identifiers)}
   };
 
   // ─── payload لـ Supabase (snake_case، بدون id عند الإضافة) ──────────
+  // ملاحظة: أعمدة JSONB في Supabase تستقبل arrays/objects مباشرة — لا JSON.stringify
   const supabasePayload: Record<string, any> = {
     raw_text: preWLForm.rawText,
     player_name: parsed.playerName,
     license: parsed.license,
     license2: parsed.license2,
-    licenses: JSON.stringify(parsed.licenses),
+    licenses: parsed.licenses,
     steam: parsed.steam,
-    steams: JSON.stringify(parsed.steams),
+    steams: parsed.steams,
     discord: parsed.discord,
-    discords: JSON.stringify(parsed.discords),
+    discords: parsed.discords,
     xbl: parsed.xbl,
     live_id: parsed.liveId,
     ip: parsed.ip,
@@ -2433,43 +2467,47 @@ ${renderIdentifiers(ban.identifiers)}
     updated_by: currentUser.user,
     updated_by_role: currentUser.role,
     updated_at: new Date(now).toISOString(),
-    timeline: JSON.stringify([...(existing?.timeline || []), entry]),
+    timeline: [...(existing?.timeline || []), entry],
   };
 
-  // عند الإضافة — Supabase يولّد id و created_at تلقائياً
-  // عند التعديل — نرسل id فقط
+  // عند التعديل فقط: نضيف id للـ match
   if (isEdit) {
     supabasePayload.id = preWLEditId;
   }
 
-  // ─── حفظ في Supabase ────────────────────────────────────────────────
-  const client = getSupabaseWithUser();
+  // ─── حفظ عبر db-proxy بـ action صريح (insert/update — لا upsert) ──────
   let savedId = isEdit ? preWLEditId! : now;
 
-  if (client) {
-    try {
-      if (isEdit) {
-        const { error } = await client
-          .from('pre_wl_hacks')
-          .update(supabasePayload)
-          .eq('id', preWLEditId);
-        if (error) throw new Error(error.message);
-      } else {
-        const { data, error } = await client
-          .from('pre_wl_hacks')
-          .insert(supabasePayload)
-          .select('id, created_at')
-          .single();
-        if (error) throw new Error(error.message);
-        savedId = data.id;
-      }
-    } catch (e: any) {
-      console.error('Supabase preWLSave error:', e.message);
-      // fallback لـ IndexedDB
-      await putItem('pre_wl_hacks', { ...supabasePayload, id: now });
+  if (isEdit) {
+    // update: نُرسل payload بدون id + match:{id:preWLEditId}
+    const { ok, error } = await callPreWLProxy('update', { ...supabasePayload }, preWLEditId!);
+    if (!ok) {
+      console.error('preWLSave update error:', error);
+      setToast({ show: true, msg: `❌ فشل التعديل: ${error}` });
+      setTimeout(() => setToast(null), 4000);
+      return;
     }
+    broadcastDbChange('pre_wl_hacks', 'update');
   } else {
-    await putItem('pre_wl_hacks', { ...supabasePayload, id: now });
+    // insert: لا نرسل id أبداً — العمود GENERATED ALWAYS AS IDENTITY في pre_wl_hacks
+    // يرفض أي قيمة صريحة (حتى لو رقمية صحيحة) ويفشل بخطأ
+    // "cannot insert a non-DEFAULT value into column id". نترك القيمة لقاعدة البيانات
+    // ونعتمد على ما ترجعه هي بدل Date.now() المحلي.
+    const insertPayload = { ...supabasePayload, created_at: new Date(now).toISOString() };
+    const { ok, error, data } = await callPreWLProxy('insert', insertPayload) as any;
+    if (!ok) {
+      console.error('preWLSave insert error:', error);
+      setToast({ show: true, msg: `❌ فشل الحفظ: ${error}` });
+      setTimeout(() => setToast(null), 4000);
+      return;
+    }
+    // id الحقيقي يجب أن يأتي من الـ DB دائماً في هذا المسار
+    if (data?.[0]?.id) {
+      savedId = data[0].id;
+    } else {
+      console.warn('preWLSave: لم يرجع db-proxy الـ id بعد الإنسرت — تحقق من select في الإدج فنكشن');
+    }
+    broadcastDbChange('pre_wl_hacks', 'insert');
   }
 
   // ─── تحديث الـ state المحلي ──────────────────────────────────────────
@@ -2524,6 +2562,7 @@ ${renderIdentifiers(ban.identifiers)}
     triggerConfirm('حذف السجل', 'هل أنت متأكد من حذف هذا السجل نهائياً؟', async () => {
       const hack = preWLHacks.find(h => h.id === id);
       await deleteItem('pre_wl_hacks', id);
+      broadcastDbChange('pre_wl_hacks', 'delete');
       setPreWLHacks(prev => prev.filter(h => h.id !== id));
       if (preWLSelected?.id === id) { setPreWLSelected(null); setPreWLView('list'); }
       await addAuditLog('Pre-WL: حذف سجل', `اللاعب: ${hack?.playerName || 'غير معروف'} | سيرفر: ${hack?.bannedFrom}`);
@@ -2608,6 +2647,7 @@ ${renderIdentifiers(ban.identifiers)}
       timeline: [firstEvent],
     };
     await putItem('cases', newCase);
+    broadcastDbChange('cases', 'insert');
     setCases(prev => [newCase, ...prev]);
     await addAuditLog('Open Case', `فتح ملف جديدة برقم #${newCase.id} للاعب ${newCase.discordId}: ${newCase.title}`);
     setShowNewCaseForm(false);
@@ -2623,6 +2663,7 @@ ${renderIdentifiers(ban.identifiers)}
     const newEvent: CaseEvent = { ...event, id: now, timestamp: now };
     const updated: InvestigationCase = { ...caseItem, timeline: [...caseItem.timeline, newEvent], updatedAt: now };
     await putItem('cases', updated);
+    broadcastDbChange('cases', 'update');
     setCases(prev => prev.map(c => c.id === updated.id ? updated : c));
     return updated;
   };
@@ -2642,6 +2683,7 @@ ${renderIdentifiers(ban.identifiers)}
     };
     const updated: InvestigationCase = { ...activeCase, status, updatedAt: Date.now() };
     await putItem('cases', updated);
+    broadcastDbChange('cases', 'update');
     setCases(prev => prev.map(c => c.id === updated.id ? updated : c));
     await appendCaseEvent(updated, { type: 'status_change', text: `تغيير حالة ملف إلى: ${statusLabels[status]}`, by: currentUser.user });
     await addAuditLog('Case Status Change', `تغيير حالة ملف #${activeCase.id} (${activeCase.discordId}) إلى ${statusLabels[status]}`);
@@ -2657,6 +2699,7 @@ ${renderIdentifiers(ban.identifiers)}
     }
     const updated: InvestigationCase = { ...activeCase, riskLevel: risk.level, riskScore: risk.score, suggestedAction: risk.suggestedAction, updatedAt: Date.now() };
     await putItem('cases', updated);
+    broadcastDbChange('cases', 'update');
     setCases(prev => prev.map(c => c.id === updated.id ? updated : c));
     await appendCaseEvent(updated, { type: 'risk_change', text: `تحديث تقييم الخطورة إلى ${risk.score}/100 (${risk.level})`, by: currentUser.user });
   };
@@ -2665,6 +2708,7 @@ ${renderIdentifiers(ban.identifiers)}
     if (!activeCase || !currentUser) return;
     const updated: InvestigationCase = { ...activeCase, linkedBanId: banId, updatedAt: Date.now() };
     await putItem('cases', updated);
+    broadcastDbChange('cases', 'update');
     setCases(prev => prev.map(c => c.id === updated.id ? updated : c));
     await appendCaseEvent(updated, { type: 'linked_ban', text: `تم ربط ملف بسجل باند رقم #${banId}`, by: currentUser.user });
     await addAuditLog('Link Ban to Case', `ربط ملف #${activeCase.id} بسجل الباند #${banId}`);
@@ -2674,6 +2718,7 @@ ${renderIdentifiers(ban.identifiers)}
     if (!activeCase || !currentUser) return;
     const updated: InvestigationCase = { ...activeCase, assignedTo: currentUser.user, status: activeCase.status === 'open' ? 'investigating' : activeCase.status, updatedAt: Date.now() };
     await putItem('cases', updated);
+    broadcastDbChange('cases', 'update');
     setCases(prev => prev.map(c => c.id === updated.id ? updated : c));
     await appendCaseEvent(updated, { type: 'assigned', text: `تم تكليف ${currentUser.user} بمتابعة هذه الملف`, by: currentUser.user });
     await addAuditLog('Case Assigned', `تكليف ${currentUser.user} ملف #${activeCase.id} (${activeCase.discordId})`);
@@ -2687,6 +2732,7 @@ ${renderIdentifiers(ban.identifiers)}
         if (!currentUser) return;
         const target = cases.find(c => c.id === caseId);
         await deleteItem('cases', caseId);
+        broadcastDbChange('cases', 'delete');
         setCases(prev => prev.filter(c => c.id !== caseId));
         if (activeCaseId === caseId) { setActiveCaseId(null); setActiveSec('investigation_hub'); }
         await addAuditLog('Delete Case', `حذف الملف #${caseId}${target ? ` (${target.discordId})` : ''}`);
@@ -2747,6 +2793,7 @@ ${renderIdentifiers(ban.identifiers)}
       createdAt: now,
     };
     await putItem('evidence_items', newEvidence);
+    broadcastDbChange('evidence_items', 'insert');
     setEvidenceItems(prev => [newEvidence, ...prev]);
 
     if (newEvidenceForm.caseId) {
@@ -2754,6 +2801,7 @@ ${renderIdentifiers(ban.identifiers)}
       if (linkedCase) {
         const updated: InvestigationCase = { ...linkedCase, evidenceIds: [...linkedCase.evidenceIds, newEvidence.id], updatedAt: now };
         await putItem('cases', updated);
+        broadcastDbChange('cases', 'update');
         setCases(prev => prev.map(c => c.id === updated.id ? updated : c));
         await appendCaseEvent(updated, { type: 'evidence_added', text: `إضافة دليل جديد: ${newEvidence.name || newEvidence.category}`, by: currentUser.user });
       }
@@ -2774,9 +2822,11 @@ ${renderIdentifiers(ban.identifiers)}
     if (!ev || !targetCase) return;
     const updatedEv: EvidenceItem = { ...ev, caseId };
     await putItem('evidence_items', updatedEv);
+    broadcastDbChange('evidence_items', 'update');
     setEvidenceItems(prev => prev.map(e => e.id === evidenceId ? updatedEv : e));
     const updatedCase: InvestigationCase = { ...targetCase, evidenceIds: Array.from(new Set([...targetCase.evidenceIds, evidenceId])), updatedAt: Date.now() };
     await putItem('cases', updatedCase);
+    broadcastDbChange('cases', 'update');
     setCases(prev => prev.map(c => c.id === caseId ? updatedCase : c));
     await appendCaseEvent(updatedCase, { type: 'evidence_added', text: `ربط دليل موجود: ${ev.name || ev.category}`, by: currentUser.user });
     await addAuditLog('Link Evidence', `ربط الدليل #${evidenceId} ملف #${caseId}`);
@@ -2793,12 +2843,14 @@ ${renderIdentifiers(ban.identifiers)}
         if (!currentUser) return;
         const ev = evidenceItems.find(e => e.id === evidenceId);
         await deleteItem('evidence_items', evidenceId);
+        broadcastDbChange('evidence_items', 'delete');
         setEvidenceItems(prev => prev.filter(e => e.id !== evidenceId));
         if (ev?.caseId) {
           const linkedCase = cases.find(c => c.id === ev.caseId);
           if (linkedCase) {
             const updated: InvestigationCase = { ...linkedCase, evidenceIds: linkedCase.evidenceIds.filter(id => id !== evidenceId), updatedAt: Date.now() };
             await putItem('cases', updated);
+            broadcastDbChange('cases', 'update');
             setCases(prev => prev.map(c => c.id === updated.id ? updated : c));
             await appendCaseEvent(updated, { type: 'evidence_removed', text: `حذف دليل: ${ev?.name || ev?.category}`, by: currentUser.user });
           }
@@ -2973,6 +3025,13 @@ ${renderIdentifiers(ban.identifiers)}
                 ))}
               </motion.div>
             </motion.div>
+
+            {/* Developed by */}
+            <div className="absolute bottom-12 left-12 hidden lg:block pointer-events-none">
+              <p className="font-orbitron text-[10px] uppercase tracking-[0.3em] text-orange opacity-60">
+                Developed by Meshal
+              </p>
+            </div>
 
             {/* Corner HUD Details */}
             <div className="absolute top-12 left-12 hidden lg:block opacity-30 pointer-events-none">
@@ -3169,6 +3228,7 @@ ${renderIdentifiers(ban.identifiers)}
   }
 
   return (
+    <>
     <div className="min-h-screen" dir="rtl">
       <nav className="sticky top-0 z-40 bg-bg/80 backdrop-blur-xl border-b border-white/5 px-[6%] py-3 flex flex-wrap justify-between items-center gap-4">
         <div className="flex items-center gap-4 cursor-pointer group" onClick={() => setActiveSec('home')}>
@@ -5705,8 +5765,8 @@ ${renderIdentifiers(ban.identifiers)}
                                value={replyInput} 
                                onChange={e => {
                                  setReplyInput(e.target.value);
-                                 if (realtimeChannelRef.current && currentUser && activeTicketId) {
-                                   realtimeChannelRef.current.send({ type: 'broadcast', event: 'typing', payload: { user: currentUser.user, ticketId: activeTicketId } });
+                                 if (uiChannelRef.current && currentUser && activeTicketId) {
+                                   uiChannelRef.current.send({ type: 'broadcast', event: 'typing', payload: { user: currentUser.user, ticketId: activeTicketId } });
                                  }
                                }} 
                                onKeyDown={e => e.key === 'Enter' && sendReply()} 
@@ -5879,6 +5939,7 @@ ${renderIdentifiers(ban.identifiers)}
                                    const newRole = e.target.value as UserRole;
                                    const updated = { ...u, role: newRole };
                                    await putItem('users', updated);
+                                   broadcastDbChange('users', 'update');
                                    setUsers(users.map(usr => usr.user === u.user ? updated : usr));
                                    await addAuditLog('Change Role', `Changed ${u.user} role to ${newRole}`);
                                  }}
@@ -6196,7 +6257,7 @@ ip:(ip:176.45.175.252)`}
                   return (
                     <motion.div
                       initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                      className="fixed inset-0 z-[150] bg-black/95 backdrop-blur-2xl flex items-center justify-center p-4"
+                      className="fixed inset-0 z-[150] bg-black/90 backdrop-blur-md flex items-center justify-center p-4"
                       dir="rtl"
                       onClick={() => { setPreWLSelected(null); setPreWLView('list'); }}
                     >
@@ -6664,6 +6725,16 @@ ip:(ip:176.45.175.252)`}
         )}
       </AnimatePresence>
     </div>
+    {/* Developed by — Portal مباشر على body لضمان fixed لا يتأثر بأي transform */}
+    {createPortal(
+      <div style={{ position: 'fixed', bottom: '16px', left: '24px', pointerEvents: 'none', zIndex: 9999 }}>
+        <p className="font-orbitron text-[10px] uppercase tracking-[0.3em] text-orange opacity-40">
+          Developed by Meshal
+        </p>
+      </div>,
+      document.body
+    )}
+    </>
   );
 }
 
